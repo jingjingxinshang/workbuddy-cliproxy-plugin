@@ -36,7 +36,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.1.5"
+	pluginVer   = "0.1.6"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 )
@@ -258,7 +258,7 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 	case pluginabi.MethodQuotaDescribe:
 		return okEnvelope(pluginapi.QuotaDescribeResponse{SupportedProviders: []string{providerID}, DisplayName: pluginName})
 	case pluginabi.MethodQuotaFetch:
-		return okEnvelope(pluginapi.QuotaFetchResponse{})
+		return okEnvelope(fetchQuota(raw))
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method, http.StatusNotImplemented), nil
 	}
@@ -626,6 +626,129 @@ func reqAuthUpdate(req pluginapi.AuthModelRequest, auth workbuddyAuth) *pluginap
 // (<provider>-auth-url and get-auth-status) with a management key the operator
 // types in. That keeps the login flow on the host's supported path, so the
 // saved credential ends up in CPA's auth store instead of inside the plugin.
+// billingUserAgent is required by the WorkBuddy billing endpoint: it answers
+// 401 to the CLI user agent that chat requests use, so the two must stay apart.
+const billingUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
+
+type billingEnvelope struct {
+	Code int `json:"code"`
+	Data struct {
+		Response struct {
+			Data struct {
+				Accounts []struct {
+					AccountID           int     `json:"AccountId"`
+					PackageName         string  `json:"PackageName"`
+					PackageCode         string  `json:"PackageCode"`
+					CapacityRemain      float64 `json:"CapacityRemain"`
+					CapacitySize        float64 `json:"CapacitySize"`
+					CycleCapacityRemain float64 `json:"CycleCapacityRemain"`
+					CycleCapacitySize   float64 `json:"CycleCapacitySize"`
+					CycleEndTime        string  `json:"CycleEndTime"`
+					Status              int     `json:"Status"`
+				} `json:"Accounts"`
+			} `json:"Data"`
+		} `json:"Response"`
+	} `json:"Data"`
+}
+
+// fetchQuota reports WorkBuddy quota to CPA's management UI.
+//
+// Empty response on any failure is deliberate: the management panel renders a
+// blank quota instead of a broken page when the upstream is unreachable or the
+// credential expired.
+func fetchQuota(raw []byte) pluginapi.QuotaFetchResponse {
+	var req pluginapi.QuotaFetchRequest
+	if json.Unmarshal(raw, &req) != nil {
+		return pluginapi.QuotaFetchResponse{}
+	}
+	var auth workbuddyAuth
+	if json.Unmarshal(req.StorageJSON, &auth) != nil || auth.AccessToken == "" {
+		return pluginapi.QuotaFetchResponse{}
+	}
+	profile := profiles[regionOf(auth)]
+	payload, errMarshal := json.Marshal(map[string]any{
+		"PageNumber":      1,
+		"PageSize":        200,
+		"ProductCode":     "p_tcaca",
+		"Status":          []int{0, 3},
+		"OnlyValidPeriod": true,
+	})
+	if errMarshal != nil {
+		return pluginapi.QuotaFetchResponse{}
+	}
+	status, body, errCall := upstream("POST", profile.baseURL+"/billing/meter/get-user-resource", profile.origin, billingUserAgent, billingHeaders(auth), payload, false)
+	if errCall != nil || status >= 400 {
+		return pluginapi.QuotaFetchResponse{}
+	}
+	var env billingEnvelope
+	if json.Unmarshal(body, &env) != nil || env.Code != 0 {
+		return pluginapi.QuotaFetchResponse{}
+	}
+	accounts := env.Data.Response.Data.Accounts
+	if len(accounts) == 0 {
+		return pluginapi.QuotaFetchResponse{}
+	}
+	resp := pluginapi.QuotaFetchResponse{}
+	var totalRemain, totalSize float64
+	for _, account := range accounts {
+		remain := account.CycleCapacityRemain
+		if remain == 0 {
+			remain = account.CapacityRemain
+		}
+		size := account.CycleCapacitySize
+		if size == 0 {
+			size = account.CapacitySize
+		}
+		totalRemain += remain
+		totalSize += size
+		name := firstNonEmpty(account.PackageName, account.PackageCode, "WorkBuddy")
+		fraction := 0.0
+		if size > 0 {
+			fraction = remain / size
+		}
+		description := fmt.Sprintf("%.0f / %.0f", remain, size)
+		resp.Groups = append(resp.Groups, pluginapi.QuotaGroup{
+			DisplayName: name,
+			Buckets: []pluginapi.QuotaBucket{{
+				Window:            account.CycleEndTime,
+				RemainingFraction: fraction,
+				ResetTime:         account.CycleEndTime,
+				Description:       description,
+			}},
+		})
+	}
+	resp.Summary = []pluginapi.QuotaMetric{
+		{Key: "remain", Label: "剩余额度", Value: totalRemain, Format: "number", Unit: "credits"},
+		{Key: "total", Label: "总额度", Value: totalSize, Format: "number", Unit: "credits"},
+	}
+	if totalSize > 0 {
+		resp.Summary = append(resp.Summary, pluginapi.QuotaMetric{
+			Key: "used_percent", Label: "已用比例", Value: (1 - totalRemain/totalSize) * 100, Format: "number", Unit: "%",
+		})
+	}
+	plan := firstNonEmpty(accounts[0].PackageName, accounts[0].PackageCode)
+	resp.Subscription = &pluginapi.QuotaSubscription{Plan: plan, TierName: plan}
+	return resp
+}
+
+func billingHeaders(auth workbuddyAuth) map[string]string {
+	headers := map[string]string{
+		"Authorization":     "Bearer " + auth.AccessToken,
+		"X-Client-Platform": "web",
+		"X-Product":         "SaaS",
+	}
+	if auth.UID != "" {
+		headers["X-User-Id"] = auth.UID
+	}
+	if auth.EnterpriseID != "" {
+		headers["X-Enterprise-Id"] = auth.EnterpriseID
+	}
+	if auth.RefreshToken != "" {
+		headers["X-Refresh-Token"] = auth.RefreshToken
+	}
+	return headers
+}
+
 func handleManagement(raw []byte) pluginapi.ManagementResponse {
 	path := managementRequestPath(raw)
 	if strings.HasSuffix(strings.TrimRight(path, "/"), "/status") {
