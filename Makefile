@@ -1,6 +1,9 @@
 PLUGIN_ID := workbuddy
-VERSION := 0.1.0
 OUT := dist
+
+# There is no version here on purpose: the version strings live in main.go
+# (pluginVer — what the panel shows) and registry.json (what the store installs).
+# Keep those two in step and tag the same number; this file only builds artifacts.
 
 .PHONY: fmt test build build-local clean
 

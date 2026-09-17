@@ -57,14 +57,19 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"gopkg.in/yaml.v3"
 )
 
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.2.3"
+	pluginVer   = "0.3.0"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
+
+	// defaultRegion is the cluster used when neither the request metadata nor
+	// the plugin configuration names a usable one.
+	defaultRegion = "cn"
 )
 
 type regionProfile struct {
@@ -89,12 +94,32 @@ type workbuddyAuth struct {
 	Domain       string `json:"domain,omitempty"`
 	Region       string `json:"region,omitempty"`
 	UserAgent    string `json:"user_agent,omitempty"`
+	// LastCheckinDay is the local date of the last successful daily-bonus
+	// claim, so the token-refresh hook claims at most once a day.
+	LastCheckinDay string `json:"last_checkin_day,omitempty"`
 }
 
 type loginState struct {
 	State     string    `json:"state"`
 	Region    string    `json:"region"`
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// pluginConfig is the slice of plugins.configs.<id> this plugin reads.
+//
+// The panel edits that object through the plugin management API and the host
+// hands the whole section back as YAML on every register/reconfigure call, so
+// there is no separate place an operator has to configure WorkBuddy login.
+type pluginConfig struct {
+	DefaultRegion string `yaml:"default_region"`
+}
+
+// lifecycleRequest is the plugin.register / plugin.reconfigure payload. The
+// host serializes the config bytes as base64 inside JSON, which unmarshalling
+// into []byte reverses.
+type lifecycleRequest struct {
+	ConfigYAML    []byte `json:"config_yaml"`
+	SchemaVersion uint32 `json:"schema_version"`
 }
 
 type envelope struct {
@@ -192,6 +217,9 @@ var (
 	hostAPI *C.cliproxy_host_api
 	loginMu sync.Mutex
 	logins  = map[string]loginState{}
+
+	configMu  sync.RWMutex
+	pluginCfg = pluginConfig{DefaultRegion: defaultRegion}
 )
 
 func main() {}
@@ -247,6 +275,9 @@ func cliproxyPluginShutdown() { hostAPI = nil }
 func handleMethod(method string, raw []byte) ([]byte, error) {
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+		if errConfigure := configure(raw); errConfigure != nil {
+			return errorEnvelope("invalid_config", errConfigure.Error(), http.StatusBadRequest), nil
+		}
 		return okEnvelope(registrationData())
 	case pluginabi.MethodAuthIdentifier, pluginabi.MethodExecutorIdentifier, pluginabi.MethodQuotaIdentifier:
 		return okEnvelope(identifierResponse{Identifier: providerID})
@@ -276,23 +307,33 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 		return okEnvelope(pluginapi.CommandLineExecutionResponse{Stdout: []byte("Use the CPA Management API to start WorkBuddy login.\n")})
 	case pluginabi.MethodManagementRegister:
 		return okEnvelope(managementRegistration{
+			// One resource page: the accounts view. Login is not a plugin
+			// page — the panel's OAuth page renders a card for every plugin
+			// that advertises an auth provider and drives the host's generic
+			// /v0/management/<provider>-auth-url flow, which needs no plugin
+			// side configuration or management key entry.
 			Resources: []pluginapi.ResourceRoute{
 				{
-					Path:        "/",
-					Menu:        "WorkBuddy 登录",
-					Description: "WorkBuddy 登录页面：选择区域、发起登录、查看状态",
-				},
-				{
 					Path:        "/quota",
-					Menu:        "WorkBuddy 额度",
-					Description: "WorkBuddy 账号额度：剩余额度、套餐与重置时间",
+					Menu:        "WorkBuddy 账号",
+					Description: "WorkBuddy 账号：额度、套餐、签到与重置时间",
 				},
 			},
 			Routes: []pluginapi.ManagementRoute{
 				{
 					Method:      "GET",
+					Path:        "/workbuddy/accounts",
+					Description: "列出所有 WorkBuddy 账号及其身份、凭据状态与签到状态",
+				},
+				{
+					Method:      "GET",
 					Path:        "/workbuddy/quota",
 					Description: "读取指定凭据的 WorkBuddy 额度",
+				},
+				{
+					Method:      "POST",
+					Path:        "/workbuddy/checkin",
+					Description: "为指定账号或全部账号执行每日签到",
 				},
 			},
 		})
@@ -308,7 +349,65 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 }
 
 func registrationData() registration {
-	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: pluginapi.Metadata{Name: pluginName, Version: pluginVer, Author: "WorkBuddy CPA Plugin", GitHubRepository: "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin", ConfigFields: []pluginapi.ConfigField{{Name: "default_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "Default WorkBuddy cluster used for login."}}}, Capabilities: registrationCapability{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"chat-completions"}, ExecutorOutputFormats: []string{"chat-completions"}, CommandLinePlugin: true, ManagementAPI: true, QuotaProvider: true}}
+	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: pluginapi.Metadata{Name: pluginName, Version: pluginVer, Author: "WorkBuddy CPA Plugin", GitHubRepository: "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin", ConfigFields: []pluginapi.ConfigField{{Name: "default_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "WorkBuddy cluster new logins default to. The panel's OAuth card starts a login without parameters, so this decides between the CN and INTL clusters."}}}, Capabilities: registrationCapability{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"chat-completions"}, ExecutorOutputFormats: []string{"chat-completions"}, CommandLinePlugin: true, ManagementAPI: true, QuotaProvider: true}}
+}
+
+// configure reads the configuration the host delivers on register and
+// reconfigure.
+//
+// Nothing about WorkBuddy login is configured in the plugin's own UI: the panel
+// starts the flow through the host's generic plugin OAuth route, and the host
+// passes this plugin's plugins.configs.workbuddy section here as YAML. Only the
+// default region is read from it, because the panel's OAuth card sends no
+// parameters and therefore cannot pick a cluster.
+func configure(raw []byte) error {
+	cfg := pluginConfig{DefaultRegion: defaultRegion}
+	if len(raw) > 0 {
+		var req lifecycleRequest
+		if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
+			return errUnmarshal
+		}
+		if len(req.ConfigYAML) > 0 {
+			if errUnmarshal := yaml.Unmarshal(req.ConfigYAML, &cfg); errUnmarshal != nil {
+				return errUnmarshal
+			}
+		}
+	}
+	cfg.DefaultRegion = normalizeRegion(cfg.DefaultRegion)
+	configMu.Lock()
+	pluginCfg = cfg
+	configMu.Unlock()
+	return nil
+}
+
+// normalizeRegion keeps only regions this plugin has a profile for, so an
+// unusable setting degrades to the default instead of breaking login.
+func normalizeRegion(region string) string {
+	region = strings.ToLower(strings.TrimSpace(region))
+	if profiles[region].baseURL != "" {
+		return region
+	}
+	return defaultRegion
+}
+
+// configuredRegion is the region a login uses when the request names none.
+func configuredRegion() string {
+	configMu.RLock()
+	region := pluginCfg.DefaultRegion
+	configMu.RUnlock()
+	return normalizeRegion(region)
+}
+
+// loginRegion resolves the cluster for one login. An explicit region wins over
+// the configured default, because the host maps every query parameter of
+// /v0/management/workbuddy-auth-url into the login metadata — that keeps
+// `?region=intl` working for an operator who usually signs in to the other
+// cluster.
+func loginRegion(metadata map[string]any) string {
+	if value, okValue := metadata["region"].(string); okValue && profiles[value].baseURL != "" {
+		return value
+	}
+	return configuredRegion()
 }
 
 func parseAuth(raw []byte) pluginapi.AuthParseResponse {
@@ -387,10 +486,7 @@ func authFileSource(req pluginapi.AuthParseRequest) string {
 func startLogin(raw []byte) pluginapi.AuthLoginStartResponse {
 	var req pluginapi.AuthLoginStartRequest
 	_ = json.Unmarshal(raw, &req)
-	region := "cn"
-	if v, ok := req.Metadata["region"].(string); ok && profiles[v].baseURL != "" {
-		region = v
-	}
+	region := loginRegion(req.Metadata)
 	profile := profiles[region]
 	url := profile.baseURL + "/v2/plugin/auth/state?platform=" + profile.loginPlatform
 	status, body, err := upstream("POST", url, profile.origin, profile.userAgent, nil, []byte("{}"), false)
@@ -468,6 +564,9 @@ func refreshAuth(raw []byte) pluginapi.AuthRefreshResponse {
 		auth.RefreshToken = token.RefreshToken
 	}
 	auth.ExpiresAt = time.Now().Add(time.Duration(maxInt64(token.ExpiresIn, 3600)) * time.Second).UnixMilli()
+	// A refresh is the only moment the plugin runs without someone opening its
+	// page, so it is also when the daily bonus gets claimed. Best effort only.
+	maybeCheckin(&auth)
 	return pluginapi.AuthRefreshResponse{Auth: authData(auth, req.AuthID+".json"), NextRefreshAfter: time.UnixMilli(auth.ExpiresAt).Add(-5 * time.Minute)}
 }
 
@@ -551,7 +650,13 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 }
 
 func upstream(method, target, origin, userAgent string, extra map[string]string, body []byte, stream bool) (int, []byte, error) {
-	ctx, cancel := contextWithTimeout(pollTimeout)
+	return upstreamWithin(pollTimeout, method, target, origin, userAgent, extra, body, stream)
+}
+
+// upstreamWithin is upstream with an explicit budget, so a caller on a latency
+// sensitive path (the check-in refresh hook) can keep its worst case short.
+func upstreamWithin(budget time.Duration, method, target, origin, userAgent string, extra map[string]string, body []byte, stream bool) (int, []byte, error) {
+	ctx, cancel := contextWithTimeout(budget)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
@@ -646,10 +751,7 @@ func writeResponse(response *C.cliproxy_buffer, raw []byte) {
 	response.len = C.size_t(len(raw))
 }
 func regionOf(auth workbuddyAuth) string {
-	if profiles[auth.Region].baseURL != "" {
-		return auth.Region
-	}
-	return "cn"
+	return normalizeRegion(auth.Region)
 }
 func authUserAgent(auth workbuddyAuth, profile regionProfile) string {
 	if auth.UserAgent != "" {
@@ -712,15 +814,6 @@ func reqAuthUpdate(req pluginapi.AuthModelRequest, auth workbuddyAuth) *pluginap
 	return &data
 }
 
-// handleManagement answers the plugin's own Management API resource requests.
-//
-// The host serves registered resources under /v0/resource/plugins/workbuddy/
-// and forwards the matching Management API routes to management.handle. The
-// page below is deliberately dependency-free: it runs in the browser served by
-// CPA itself, so it can call the host's own /v0/management endpoints
-// (<provider>-auth-url and get-auth-status) with a management key the operator
-// types in. That keeps the login flow on the host's supported path, so the
-// saved credential ends up in CPA's auth store instead of inside the plugin.
 // billingUserAgent is required by the WorkBuddy billing endpoint: it answers
 // 401 to the CLI user agent that chat requests use, so the two must stay apart.
 const billingUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
@@ -812,21 +905,7 @@ func credentialJSONForQuota(req pluginapi.QuotaFetchRequest) []byte {
 	if len(req.StorageJSON) > 0 {
 		return req.StorageJSON
 	}
-	authIndex := strings.TrimSpace(req.AuthIndex)
-	if authIndex == "" {
-		return nil
-	}
-	result, errCall := hostCall(pluginabi.MethodHostAuthGet, map[string]string{"auth_index": authIndex})
-	if errCall != nil {
-		return nil
-	}
-	var payload struct {
-		JSON json.RawMessage `json:"json"`
-	}
-	if json.Unmarshal(result, &payload) != nil {
-		return nil
-	}
-	return payload.JSON
+	return credentialJSONForAuthIndex(req.AuthIndex)
 }
 
 // quotaEnvelope answers a quota fetch.
@@ -996,17 +1075,37 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 	// quota JSON, and the menu showed the raw payload instead of the page.
 	if page, okPage := resourcePagePath(path); okPage {
 		if page == "/quota" {
-			return htmlManagementResponse(quotaPageHTML())
+			return htmlManagementResponse(accountsPageHTML())
 		}
-		return htmlManagementResponse(loginPageHTML())
+		// The plugin's own login page used to live at "/". It was removed
+		// because the panel OAuth page already starts the same host flow with
+		// its own credentials, so answering 404 keeps a stale bookmark
+		// diagnosable instead of serving a page that no longer exists.
+		return errorManagementResponse(http.StatusNotFound, "unknown plugin resource page")
 	}
 
-	// Plugin-owned route: quota for one credential.
+	// Plugin-owned routes. The host dispatches these by exact method and path,
+	// so every branch here is also declared in the management registration.
+	if strings.HasSuffix(path, "/"+providerID+"/accounts") {
+		if method := managementRequestMethod(raw); method != "" && method != http.MethodGet {
+			return errorManagementResponse(http.StatusMethodNotAllowed, "accounts is a GET route")
+		}
+		return accountsView(raw)
+	}
+
+	if strings.HasSuffix(path, "/"+providerID+"/checkin") {
+		if method := managementRequestMethod(raw); method != "" && method != http.MethodPost {
+			return errorManagementResponse(http.StatusMethodNotAllowed, "checkin is a POST route")
+		}
+		return checkinRouteResponse(raw)
+	}
+
+	// Quota for one credential.
 	//
 	// The management panel renders quota only for its six built-in providers
 	// (QuotaProviderType is a closed union), so a plugin provider has no place
-	// there. This route exists for the plugin's own resource page, which is the
-	// supported way for a plugin to draw its own data.
+	// there. The accounts page is the supported way for a plugin to draw its own
+	// data.
 	if strings.HasSuffix(path, "/"+providerID+"/quota") {
 		return quotaRouteResponse(raw)
 	}
@@ -1079,34 +1178,20 @@ type hostAuthFileEntry struct {
 // missing, the plugin asks the host for its credential list and uses the first
 // WorkBuddy entry.
 func resolveAuthIndex(raw []byte) (string, error) {
-	explicit := managementQueryValue(raw, "auth_index")
-	if explicit == "" {
-		explicit = managementQueryValue(raw, "authIndex")
-	}
+	explicit := strings.TrimSpace(firstNonEmpty(managementQueryValue(raw, "auth_index"), managementQueryValue(raw, "authIndex")))
 	if explicit != "" {
 		return explicit, nil
 	}
-	result, errCall := hostCall(pluginabi.MethodHostAuthList, map[string]any{})
-	if errCall != nil {
-		return "", fmt.Errorf("cannot list credentials: %w", errCall)
-	}
-	var payload struct {
-		Files []hostAuthFileEntry `json:"files"`
-	}
-	if errUnmarshal := json.Unmarshal(result, &payload); errUnmarshal != nil {
-		return "", fmt.Errorf("credential list is not readable: %w", errUnmarshal)
+	entries, errList := workbuddyAccounts()
+	if errList != nil {
+		return "", errList
 	}
 	wanted := strings.ToLower(strings.TrimSpace(managementQueryValue(raw, "name")))
-	for _, file := range payload.Files {
-		if !strings.EqualFold(strings.TrimSpace(file.Provider), providerID) {
-			continue
-		}
+	for _, file := range entries {
 		if wanted != "" && strings.ToLower(strings.TrimSpace(file.Name)) != wanted {
 			continue
 		}
-		if strings.TrimSpace(file.AuthIndex) != "" {
-			return strings.TrimSpace(file.AuthIndex), nil
-		}
+		return strings.TrimSpace(file.AuthIndex), nil
 	}
 	return "", fmt.Errorf("no WorkBuddy credential found (provider=%s)", providerID)
 }
@@ -1205,148 +1290,24 @@ func managementRequestPath(raw []byte) string {
 	return ""
 }
 
-func loginPageHTML() string {
-	return `<!doctype html>
-<html lang="zh-CN" data-theme="light">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<title>WorkBuddy 登录</title>
-<style>
- *,*::before,*::after{box-sizing:border-box}` + themePalette + `
- body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;
-   margin:0;padding:28px 22px;background:var(--bg);color:var(--text);
-   -webkit-font-smoothing:antialiased}
- h1{font-size:20px;margin:0 0 4px}
- .sub{color:var(--muted);margin-bottom:20px;font-size:13px}
- label{display:block;margin:14px 0 6px;color:var(--muted);font-size:13px}
- select,input{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(--line);
-   background:var(--panel);color:var(--text);font-size:14px;outline:none}
- select:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,110,240,.15)}
- button{margin-top:16px;padding:10px 16px;border-radius:8px;border:0;background:var(--accent);
-   color:#fff;font-size:14px;font-weight:500;cursor:pointer;transition:filter .15s}
- button:hover{filter:brightness(1.08)}
- button:disabled{background:var(--panel-2);color:var(--muted);cursor:not-allowed}
- .row{display:flex;gap:10px}
- .row>div{flex:1}
- .box{margin-top:18px;padding:12px 14px;border-radius:10px;background:var(--panel);
-   border:1px solid var(--line);border-left:3px solid var(--accent);word-break:break-all;
-   box-shadow:var(--shadow);color:var(--muted)}
- .box.hint{border-left-color:var(--line)}
- .err{border-left-color:var(--danger);color:var(--danger)}
- .ok{border-left-color:var(--ok);color:var(--ok)}
- a{color:var(--accent)}
- code{background:var(--panel-2);padding:1px 5px;border-radius:4px;border:1px solid var(--line)}
- ol{padding-left:20px;color:var(--muted)}
-</style>
-<script>` + themeBootScript + `</script>
-</head>
-<body>
-<h1>WorkBuddy</h1>
-<div class="sub">CLIProxyAPI 插件 &middot; provider <code>workbuddy</code> &middot; v` + pluginVer + `</div>
-
-<label for="region">集群区域</label>
-<select id="region">
-  <option value="cn">中国大陆 (cn)</option>
-  <option value="intl">国际 (intl)</option>
-</select>
-
-<label for="key">管理密钥（仅保存在本机浏览器）</label>
-<input id="key" type="password" placeholder="remote-management.secret-key" autocomplete="off">
-
-<button id="start">开始登录</button>
-
-<div id="out" class="box" style="display:none"></div>
-
-<div class="box hint">
-<ol>
-  <li>填写管理密钥，选择区域，点击「开始登录」。</li>
-  <li>在浏览器打开返回的地址，用 WorkBuddy 客户端扫码或登录。</li>
-  <li>本页会自动轮询，成功后凭据写入 CPA 的 <code>auths/</code> 目录。</li>
-  <li>回到 CPA 的模型列表即可看到 WorkBuddy 模型。</li>
-</ol>
-</div>
-
-<script>
-var out = document.getElementById('out');
-var keyInput = document.getElementById('key');
-var regionSelect = document.getElementById('region');
-var startButton = document.getElementById('start');
-var savedKey = '';
-
-try { savedKey = localStorage.getItem('wbaw_mgmt_key') || ''; } catch (e) { savedKey = ''; }
-if (savedKey) { keyInput.value = savedKey; }
-
-function show(text, kind) {
-  out.style.display = 'block';
-  out.className = 'box' + (kind ? ' ' + kind : '');
-  out.innerHTML = text;
-}
-
-function authHeaders(key) {
-  return { 'Authorization': 'Bearer ' + key };
-}
-
-startButton.onclick = function () {
-  var key = keyInput.value.trim();
-  if (!key) { show('请先填写管理密钥。', 'err'); return; }
-  try { localStorage.setItem('wbaw_mgmt_key', key); } catch (e) {}
-  var region = regionSelect.value;
-  startButton.disabled = true;
-  show('正在向 WorkBuddy 申请登录地址…');
-
-  fetch('/v0/management/workbuddy-auth-url?region=' + encodeURIComponent(region), { headers: authHeaders(key) })
-    .then(function (resp) { return resp.json().then(function (body) { return { status: resp.status, body: body }; }); })
-    .then(function (result) {
-      if (result.status !== 200) {
-        show('请求失败：' + JSON.stringify(result.body), 'err');
-        startButton.disabled = false;
-        return;
-      }
-      var url = result.body.url || '';
-      var state = result.body.state || '';
-      if (!url || !state) {
-        show('响应缺少 url 或 state：' + JSON.stringify(result.body), 'err');
-        startButton.disabled = false;
-        return;
-      }
-      show('请在浏览器打开以下地址完成登录：<br><a href="' + url + '" target="_blank" rel="noreferrer">' + url + '</a><br><br>状态：等待扫码…');
-      poll(key, state);
-    })
-    .catch(function (err) { show('请求异常：' + err, 'err'); startButton.disabled = false; });
-};
-
-function poll(key, state) {
-  var deadline = Date.now() + 300000;
-  var timer = setInterval(function () {
-    if (Date.now() > deadline) {
-      clearInterval(timer);
-      startButton.disabled = false;
-      show('登录超时，请重新开始。', 'err');
-      return;
-    }
-    fetch('/v0/management/get-auth-status?state=' + encodeURIComponent(state), { headers: authHeaders(key) })
-      .then(function (resp) { return resp.json(); })
-      .then(function (body) {
-        if (body.status === 'ok') {
-          clearInterval(timer);
-          startButton.disabled = false;
-          show('登录成功，凭据已保存。现在可以在 CPA 模型列表中看到 WorkBuddy 模型。', 'ok');
-          return;
-        }
-        if (body.status === 'error') {
-          clearInterval(timer);
-          startButton.disabled = false;
-          show('登录失败：' + (body.error || '未知错误'), 'err');
-          return;
-        }
-        out.innerHTML = out.innerHTML.replace(/状态：[^<]*/, '状态：等待扫码…');
-      })
-      .catch(function (err) { show('轮询异常：' + err, 'err'); });
-  }, 2000);
-}
-</script>
-</body>
-</html>`
+// managementRequestMethod reads the HTTP method case-insensitively for the same
+// reason managementRequestPath does. An empty answer means the host did not send
+// one, which callers treat as "no restriction".
+func managementRequestMethod(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return ""
+	}
+	for key, value := range payload {
+		if !strings.EqualFold(key, "method") {
+			continue
+		}
+		if text, ok := value.(string); ok {
+			return strings.ToUpper(strings.TrimSpace(text))
+		}
+	}
+	return ""
 }
