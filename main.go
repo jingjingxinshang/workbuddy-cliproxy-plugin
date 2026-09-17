@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +37,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.1.6"
+	pluginVer   = "0.1.7"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 )
@@ -280,23 +281,65 @@ func parseAuth(raw []byte) pluginapi.AuthParseResponse {
 	if json.Unmarshal(req.RawJSON, &auth) != nil || auth.AccessToken == "" {
 		return pluginapi.AuthParseResponse{}
 	}
-	return pluginapi.AuthParseResponse{Handled: true, Auth: authData(auth, req.FileName)}
+	return pluginapi.AuthParseResponse{Handled: true, Auth: authData(auth, authFileSource(req))}
 }
 
+// authData builds the credential record CPA stores.
+//
+// ID deliberately mirrors the file name. CPA names plugin-backed runtime
+// credentials by ID, and its management endpoints address them by that name —
+// `/auth-files/download` reads <auth-dir>/<name> verbatim. Returning the
+// WorkBuddy uid here made the panel display (and try to download) a file that
+// never existed, because the credential on disk is named after FileName.
 func authData(auth workbuddyAuth, fileName string) pluginapi.AuthData {
 	if fileName == "" {
 		fileName = providerID + ".json"
 	}
 	body, _ := json.Marshal(auth)
-	id := auth.UID
+	id := strings.TrimSuffix(fileName, ".json")
 	if id == "" {
-		id = shortID(auth.AccessToken)
+		id = providerID
 	}
 	label := auth.Nickname
 	if label == "" {
-		label = "WorkBuddy " + id
+		label = "WorkBuddy"
 	}
-	return pluginapi.AuthData{Provider: providerID, ID: id, FileName: fileName, Label: label, StorageJSON: body, Metadata: map[string]any{"region": regionOf(auth)}}
+	metadata := map[string]any{"region": regionOf(auth)}
+	if auth.UID != "" {
+		metadata["uid"] = auth.UID
+	}
+	if auth.Nickname != "" {
+		metadata["nickname"] = auth.Nickname
+	}
+	if auth.EnterpriseID != "" {
+		metadata["enterprise_id"] = auth.EnterpriseID
+	}
+	return pluginapi.AuthData{Provider: providerID, ID: id, FileName: fileName, Label: label, StorageJSON: body, Metadata: metadata}
+}
+
+// credentialFileName is the stable on-disk name for one WorkBuddy account. The
+// uid is preferred over the token because access tokens rotate on refresh while
+// the credential file must keep its name.
+func credentialFileName(auth workbuddyAuth) string {
+	suffix := firstNonEmpty(auth.UID, shortID(auth.AccessToken))
+	if suffix == "" {
+		suffix = "default"
+	}
+	return providerID + "-" + suffix + ".json"
+}
+
+// authFileSource resolves the file name of an existing credential from the
+// parse request, so a re-parsed credential keeps pointing at its own file.
+func authFileSource(req pluginapi.AuthParseRequest) string {
+	source := firstNonEmpty(req.FileName, req.Path)
+	if source == "" {
+		return providerID + ".json"
+	}
+	base := filepath.Base(source)
+	if !strings.HasSuffix(strings.ToLower(base), ".json") {
+		base += ".json"
+	}
+	return base
 }
 
 func startLogin(raw []byte) pluginapi.AuthLoginStartResponse {
@@ -353,7 +396,7 @@ func pollLogin(raw []byte) pluginapi.AuthLoginPollResponse {
 	loginMu.Lock()
 	delete(logins, req.State)
 	loginMu.Unlock()
-	return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusSuccess, Message: "WorkBuddy login complete", Auth: authData(auth, "workbuddy-"+shortID(auth.AccessToken)+".json")}
+	return pluginapi.AuthLoginPollResponse{Status: pluginapi.AuthLoginStatusSuccess, Message: "WorkBuddy login complete", Auth: authData(auth, credentialFileName(auth))}
 }
 
 func refreshAuth(raw []byte) pluginapi.AuthRefreshResponse {
