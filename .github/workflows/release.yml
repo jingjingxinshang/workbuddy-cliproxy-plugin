@@ -57,7 +57,16 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Create checksums
-        run: sha256sum dist/*.zip > dist/checksums.txt
+        run: |
+          cd dist
+          sha256sum *.zip > checksums.txt
+          # CPA looks up checksums by bare release asset name, so no path prefix allowed.
+          if grep -q '/' checksums.txt; then
+            echo "checksums.txt must not contain path separators" >&2
+            cat checksums.txt >&2
+            exit 1
+          fi
+          cat checksums.txt
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
