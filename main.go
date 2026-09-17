@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.1.8"
+	pluginVer   = "0.1.9"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 )
@@ -285,7 +285,7 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 	case pluginabi.MethodQuotaDescribe:
 		return okEnvelope(pluginapi.QuotaDescribeResponse{SupportedProviders: []string{providerID}, DisplayName: pluginName})
 	case pluginabi.MethodQuotaFetch:
-		return okEnvelope(fetchQuota(raw))
+		return quotaEnvelope(raw)
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method, http.StatusNotImplemented), nil
 	}
@@ -658,6 +658,16 @@ func hasTag(values []string, wanted string) bool {
 	}
 	return false
 }
+
+// truncate keeps error messages short; it is only used for upstream text that
+// is already free of credentials.
+func truncate(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "…"
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {
@@ -700,7 +710,8 @@ func reqAuthUpdate(req pluginapi.AuthModelRequest, auth workbuddyAuth) *pluginap
 const billingUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
 
 type billingEnvelope struct {
-	Code int `json:"code"`
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
 	Data struct {
 		Response struct {
 			Data struct {
@@ -802,14 +813,39 @@ func credentialJSONForQuota(req pluginapi.QuotaFetchRequest) []byte {
 	return payload.JSON
 }
 
-func fetchQuota(raw []byte) pluginapi.QuotaFetchResponse {
+// quotaEnvelope answers a quota fetch.
+//
+// Failures are reported as an error envelope instead of an empty result: the
+// management panel surfaces the message, which is the only way to tell a
+// missing credential apart from an upstream rejection or a network failure.
+// Messages never contain tokens — only status codes and upstream error codes.
+func quotaEnvelope(raw []byte) ([]byte, error) {
+	resp, errFetch := fetchQuota(raw)
+	if errFetch == nil {
+		return okEnvelope(resp)
+	}
+	envelope, errMarshal := pluginabi.NewErrorEnvelope("quota_unavailable", errFetch.Error(), http.StatusBadGateway)
+	if errMarshal != nil {
+		return errorEnvelope("quota_unavailable", errFetch.Error(), http.StatusBadGateway), nil
+	}
+	return envelope, nil
+}
+
+func fetchQuota(raw []byte) (pluginapi.QuotaFetchResponse, error) {
 	var req pluginapi.QuotaFetchRequest
-	if json.Unmarshal(raw, &req) != nil {
-		return pluginapi.QuotaFetchResponse{}
+	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("invalid quota request: %w", errUnmarshal)
+	}
+	credential := credentialJSONForQuota(req)
+	if len(credential) == 0 {
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("credential unavailable (auth_index=%q): host did not return a stored credential", req.AuthIndex)
 	}
 	var auth workbuddyAuth
-	if json.Unmarshal(credentialJSONForQuota(req), &auth) != nil || auth.AccessToken == "" {
-		return pluginapi.QuotaFetchResponse{}
+	if errUnmarshal := json.Unmarshal(credential, &auth); errUnmarshal != nil {
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("stored credential is not readable: %w", errUnmarshal)
+	}
+	if auth.AccessToken == "" {
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("stored credential has no access_token")
 	}
 	profile := profiles[regionOf(auth)]
 	payload, errMarshal := json.Marshal(map[string]any{
@@ -820,19 +856,25 @@ func fetchQuota(raw []byte) pluginapi.QuotaFetchResponse {
 		"OnlyValidPeriod": true,
 	})
 	if errMarshal != nil {
-		return pluginapi.QuotaFetchResponse{}
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("encode billing request: %w", errMarshal)
 	}
 	status, body, errCall := upstream("POST", profile.baseURL+"/billing/meter/get-user-resource", profile.origin, billingUserAgent, billingHeaders(auth), payload, false)
-	if errCall != nil || status >= 400 {
-		return pluginapi.QuotaFetchResponse{}
+	if errCall != nil {
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("billing request failed: %w", errCall)
+	}
+	if status >= 400 {
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("billing endpoint returned HTTP %d: %s", status, truncate(string(body), 200))
 	}
 	var env billingEnvelope
-	if json.Unmarshal(body, &env) != nil || env.Code != 0 {
-		return pluginapi.QuotaFetchResponse{}
+	if errUnmarshal := json.Unmarshal(body, &env); errUnmarshal != nil {
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("billing response is not JSON: %s", truncate(string(body), 200))
+	}
+	if env.Code != 0 {
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("billing API error code=%d: %s", env.Code, truncate(env.Msg, 200))
 	}
 	accounts := env.Data.Response.Data.Accounts
 	if len(accounts) == 0 {
-		return pluginapi.QuotaFetchResponse{}
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("billing response contains no accounts")
 	}
 	resp := pluginapi.QuotaFetchResponse{}
 	var totalRemain, totalSize float64
@@ -874,7 +916,7 @@ func fetchQuota(raw []byte) pluginapi.QuotaFetchResponse {
 	}
 	plan := firstNonEmpty(accounts[0].PackageName, accounts[0].PackageCode)
 	resp.Subscription = &pluginapi.QuotaSubscription{Plan: plan, TierName: plan}
-	return resp
+	return resp, nil
 }
 
 func billingHeaders(auth workbuddyAuth) map[string]string {
