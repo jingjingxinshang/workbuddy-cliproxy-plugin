@@ -77,6 +77,30 @@ WorkBuddy 自身的账号登录属于插件运行时行为，由插件在安装�
 
 ## 登录
 
-插件启用后，通过 CPA Management API 的插件登录入口发起 WorkBuddy 登录。插件返回二维码/登录 URL，轮询完成后 CPA 会保存 `provider: workbuddy` 的 auth JSON。
+插件实现的是 CPA 的 `AuthProvider`，登录走 CPA 的标准 OAuth 流程，凭据由 CPA 自己保存到 `auths/`：
+
+```bash
+# 1. 发起登录，返回 {url, state}
+curl -H "Authorization: Bearer <MANAGEMENT_KEY>" \
+  "http://127.0.0.1:8317/v0/management/workbuddy-auth-url?region=cn"
+
+# 2. 打开返回的 url，用 WorkBuddy 客户端扫码/登录
+
+# 3. 轮询状态；返回 {"status":"ok"} 即完成并已保存凭据
+curl -H "Authorization: Bearer <MANAGEMENT_KEY>" \
+  "http://127.0.0.1:8317/v0/management/get-auth-status?state=<state>"
+```
+
+`region` 取值 `cn`（中国大陆）或 `intl`（国际），决定使用哪个集群。
+
+插件同时注册了一个管理页面，在 CPA 管理面板中打开 `WorkBuddy` 菜单即可使用图形化登录：
+
+```text
+/v0/resource/plugins/workbuddy/
+```
+
+该页面在本机浏览器中填写管理密钥后调用上述两个端点，密钥只保存在浏览器 localStorage，不会发给插件。
+
+登录成功后，WorkBuddy 模型会出现在 CPA 的模型列表中。
 
 WorkBuddy 原始接口属于第三方服务，登录、额度和模型接口的使用必须符合 WorkBuddy 服务条款。

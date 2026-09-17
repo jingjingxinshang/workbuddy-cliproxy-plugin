@@ -36,7 +36,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.1.0"
+	pluginVer   = "0.1.5"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 )
@@ -248,9 +248,13 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 	case pluginabi.MethodCommandLineExecute:
 		return okEnvelope(pluginapi.CommandLineExecutionResponse{Stdout: []byte("Use the CPA Management API to start WorkBuddy login.\n")})
 	case pluginabi.MethodManagementRegister:
-		return okEnvelope(managementRegistration{Resources: []pluginapi.ResourceRoute{{Path: "/status", Menu: "WorkBuddy", Description: "WorkBuddy provider status"}}})
+		return okEnvelope(managementRegistration{Resources: []pluginapi.ResourceRoute{{
+			Path:        "/",
+			Menu:        "WorkBuddy",
+			Description: "WorkBuddy 登录页面：选择区域、发起登录、查看状态",
+		}}})
 	case pluginabi.MethodManagementHandle:
-		return okEnvelope(pluginapi.ManagementResponse{StatusCode: http.StatusOK, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"provider":"workbuddy","status":"ready"}`)})
+		return okEnvelope(handleManagement(raw))
 	case pluginabi.MethodQuotaDescribe:
 		return okEnvelope(pluginapi.QuotaDescribeResponse{SupportedProviders: []string{providerID}, DisplayName: pluginName})
 	case pluginabi.MethodQuotaFetch:
@@ -611,4 +615,198 @@ func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
 func reqAuthUpdate(req pluginapi.AuthModelRequest, auth workbuddyAuth) *pluginapi.AuthData {
 	data := authData(auth, req.AuthID+".json")
 	return &data
+}
+
+// handleManagement answers the plugin's own Management API resource requests.
+//
+// The host serves registered resources under /v0/resource/plugins/workbuddy/
+// and forwards the matching Management API routes to management.handle. The
+// page below is deliberately dependency-free: it runs in the browser served by
+// CPA itself, so it can call the host's own /v0/management endpoints
+// (<provider>-auth-url and get-auth-status) with a management key the operator
+// types in. That keeps the login flow on the host's supported path, so the
+// saved credential ends up in CPA's auth store instead of inside the plugin.
+func handleManagement(raw []byte) pluginapi.ManagementResponse {
+	path := managementRequestPath(raw)
+	if strings.HasSuffix(strings.TrimRight(path, "/"), "/status") {
+		body, errMarshal := json.Marshal(map[string]any{
+			"provider": providerID,
+			"name":     pluginName,
+			"version":  pluginVer,
+			"regions":  []string{"cn", "intl"},
+			"login": map[string]string{
+				"start":  "/v0/management/" + providerID + "-auth-url",
+				"status": "/v0/management/get-auth-status",
+			},
+		})
+		if errMarshal != nil {
+			body = []byte(`{"provider":"workbuddy"}`)
+		}
+		return pluginapi.ManagementResponse{
+			StatusCode: http.StatusOK,
+			Headers:    http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+			Body:       body,
+		}
+	}
+	return pluginapi.ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       []byte(loginPageHTML()),
+	}
+}
+
+// managementRequestPath reads the request path case-insensitively, because the
+// host serializes its own request struct and the JSON key casing is not part of
+// the plugin contract.
+func managementRequestPath(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return ""
+	}
+	for key, value := range payload {
+		if !strings.EqualFold(key, "path") {
+			continue
+		}
+		if text, ok := value.(string); ok {
+			return text
+		}
+	}
+	return ""
+}
+
+func loginPageHTML() string {
+	return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WorkBuddy 登录</title>
+<style>
+ body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;padding:28px 22px;background:#111;color:#ddd}
+ h1{font-size:19px;margin:0 0 4px}
+ .sub{color:#999;margin-bottom:20px;font-size:13px}
+ label{display:block;margin:14px 0 6px;color:#bbb;font-size:13px}
+ select,input{width:100%;box-sizing:border-box;padding:9px 10px;border-radius:6px;border:1px solid #333;background:#1a1a1a;color:#eee;font-size:14px}
+ button{margin-top:16px;padding:10px 16px;border-radius:6px;border:0;background:#2f6feb;color:#fff;font-size:14px;cursor:pointer}
+ button:disabled{background:#333;color:#888;cursor:not-allowed}
+ .row{display:flex;gap:10px}
+ .row>div{flex:1}
+ .box{margin-top:18px;padding:12px 14px;border-radius:8px;background:#1a1a1a;border-left:3px solid #2f6feb;word-break:break-all}
+ .err{border-left-color:#e78a8a;color:#f0b0b0}
+ .ok{border-left-color:#6ee7a8;color:#a8f0c8}
+ a{color:#7cc4ff}
+ code{background:#222;padding:1px 5px;border-radius:4px}
+ ol{padding-left:20px;color:#bbb}
+</style>
+</head>
+<body>
+<h1>WorkBuddy</h1>
+<div class="sub">CLIProxyAPI 插件 &middot; provider <code>workbuddy</code> &middot; v` + pluginVer + `</div>
+
+<label for="region">集群区域</label>
+<select id="region">
+  <option value="cn">中国大陆 (cn)</option>
+  <option value="intl">国际 (intl)</option>
+</select>
+
+<label for="key">管理密钥（仅保存在本机浏览器）</label>
+<input id="key" type="password" placeholder="remote-management.secret-key" autocomplete="off">
+
+<button id="start">开始登录</button>
+
+<div id="out" class="box" style="display:none"></div>
+
+<div class="box" style="border-left-color:#444">
+<ol>
+  <li>填写管理密钥，选择区域，点击「开始登录」。</li>
+  <li>在浏览器打开返回的地址，用 WorkBuddy 客户端扫码或登录。</li>
+  <li>本页会自动轮询，成功后凭据写入 CPA 的 <code>auths/</code> 目录。</li>
+  <li>回到 CPA 的模型列表即可看到 WorkBuddy 模型。</li>
+</ol>
+</div>
+
+<script>
+var out = document.getElementById('out');
+var keyInput = document.getElementById('key');
+var regionSelect = document.getElementById('region');
+var startButton = document.getElementById('start');
+var savedKey = '';
+
+try { savedKey = localStorage.getItem('wbaw_mgmt_key') || ''; } catch (e) { savedKey = ''; }
+if (savedKey) { keyInput.value = savedKey; }
+
+function show(text, kind) {
+  out.style.display = 'block';
+  out.className = 'box' + (kind ? ' ' + kind : '');
+  out.innerHTML = text;
+}
+
+function authHeaders(key) {
+  return { 'Authorization': 'Bearer ' + key };
+}
+
+startButton.onclick = function () {
+  var key = keyInput.value.trim();
+  if (!key) { show('请先填写管理密钥。', 'err'); return; }
+  try { localStorage.setItem('wbaw_mgmt_key', key); } catch (e) {}
+  var region = regionSelect.value;
+  startButton.disabled = true;
+  show('正在向 WorkBuddy 申请登录地址…');
+
+  fetch('/v0/management/workbuddy-auth-url?region=' + encodeURIComponent(region), { headers: authHeaders(key) })
+    .then(function (resp) { return resp.json().then(function (body) { return { status: resp.status, body: body }; }); })
+    .then(function (result) {
+      if (result.status !== 200) {
+        show('请求失败：' + JSON.stringify(result.body), 'err');
+        startButton.disabled = false;
+        return;
+      }
+      var url = result.body.url || '';
+      var state = result.body.state || '';
+      if (!url || !state) {
+        show('响应缺少 url 或 state：' + JSON.stringify(result.body), 'err');
+        startButton.disabled = false;
+        return;
+      }
+      show('请在浏览器打开以下地址完成登录：<br><a href="' + url + '" target="_blank" rel="noreferrer">' + url + '</a><br><br>状态：等待扫码…');
+      poll(key, state);
+    })
+    .catch(function (err) { show('请求异常：' + err, 'err'); startButton.disabled = false; });
+};
+
+function poll(key, state) {
+  var deadline = Date.now() + 300000;
+  var timer = setInterval(function () {
+    if (Date.now() > deadline) {
+      clearInterval(timer);
+      startButton.disabled = false;
+      show('登录超时，请重新开始。', 'err');
+      return;
+    }
+    fetch('/v0/management/get-auth-status?state=' + encodeURIComponent(state), { headers: authHeaders(key) })
+      .then(function (resp) { return resp.json(); })
+      .then(function (body) {
+        if (body.status === 'ok') {
+          clearInterval(timer);
+          startButton.disabled = false;
+          show('登录成功，凭据已保存。现在可以在 CPA 模型列表中看到 WorkBuddy 模型。', 'ok');
+          return;
+        }
+        if (body.status === 'error') {
+          clearInterval(timer);
+          startButton.disabled = false;
+          show('登录失败：' + (body.error || '未知错误'), 'err');
+          return;
+        }
+        out.innerHTML = out.innerHTML.replace(/状态：[^<]*/, '状态：等待扫码…');
+      })
+      .catch(function (err) { show('轮询异常：' + err, 'err'); });
+  }, 2000);
+}
+</script>
+</body>
+</html>`
 }
