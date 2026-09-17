@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.2.0"
+	pluginVer   = "0.2.1"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 )
@@ -998,6 +998,18 @@ func jsonManagementResponse(body []byte) pluginapi.ManagementResponse {
 	}
 }
 
+func errorManagementResponse(status int, message string) pluginapi.ManagementResponse {
+	body, errMarshal := json.Marshal(map[string]string{"error": message})
+	if errMarshal != nil {
+		body = []byte(`{"error":"unknown error"}`)
+	}
+	return pluginapi.ManagementResponse{
+		StatusCode: status,
+		Headers:    http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+		Body:       body,
+	}
+}
+
 func htmlManagementResponse(body string) pluginapi.ManagementResponse {
 	return pluginapi.ManagementResponse{
 		StatusCode: http.StatusOK,
@@ -1006,18 +1018,59 @@ func htmlManagementResponse(body string) pluginapi.ManagementResponse {
 	}
 }
 
-// quotaRouteResponse answers GET /v0/management/workbuddy/quota?auth_index=...
-func quotaRouteResponse(raw []byte) pluginapi.ManagementResponse {
-	authIndex := managementQueryValue(raw, "auth_index")
-	if authIndex == "" {
-		authIndex = managementQueryValue(raw, "authIndex")
+// hostAuthFileEntry is the subset of a host credential record this plugin needs.
+type hostAuthFileEntry struct {
+	AuthIndex string `json:"auth_index"`
+	Name      string `json:"name"`
+	Provider  string `json:"provider"`
+	Label     string `json:"label"`
+}
+
+// resolveAuthIndex picks the credential to query.
+//
+// The auth_index is optional on purpose: the resource page may run before any
+// credential field is known, and requiring a query parameter only made the page
+// fail with "auth_index is required" instead of showing quota. When it is
+// missing, the plugin asks the host for its credential list and uses the first
+// WorkBuddy entry.
+func resolveAuthIndex(raw []byte) (string, error) {
+	explicit := managementQueryValue(raw, "auth_index")
+	if explicit == "" {
+		explicit = managementQueryValue(raw, "authIndex")
 	}
-	if authIndex == "" {
-		return pluginapi.ManagementResponse{
-			StatusCode: http.StatusBadRequest,
-			Headers:    http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
-			Body:       []byte(`{"error":"auth_index is required"}`),
+	if explicit != "" {
+		return explicit, nil
+	}
+	result, errCall := hostCall(pluginabi.MethodHostAuthList, map[string]any{})
+	if errCall != nil {
+		return "", fmt.Errorf("cannot list credentials: %w", errCall)
+	}
+	var payload struct {
+		Files []hostAuthFileEntry `json:"files"`
+	}
+	if errUnmarshal := json.Unmarshal(result, &payload); errUnmarshal != nil {
+		return "", fmt.Errorf("credential list is not readable: %w", errUnmarshal)
+	}
+	wanted := strings.ToLower(strings.TrimSpace(managementQueryValue(raw, "name")))
+	for _, file := range payload.Files {
+		if !strings.EqualFold(strings.TrimSpace(file.Provider), providerID) {
+			continue
 		}
+		if wanted != "" && strings.ToLower(strings.TrimSpace(file.Name)) != wanted {
+			continue
+		}
+		if strings.TrimSpace(file.AuthIndex) != "" {
+			return strings.TrimSpace(file.AuthIndex), nil
+		}
+	}
+	return "", fmt.Errorf("no WorkBuddy credential found (provider=%s)", providerID)
+}
+
+// quotaRouteResponse answers GET /v0/management/workbuddy/quota[?auth_index=...]
+func quotaRouteResponse(raw []byte) pluginapi.ManagementResponse {
+	authIndex, errResolve := resolveAuthIndex(raw)
+	if errResolve != nil {
+		return errorManagementResponse(http.StatusBadGateway, errResolve.Error())
 	}
 	request, errMarshal := json.Marshal(pluginapi.QuotaFetchRequest{AuthIndex: authIndex, Provider: providerID})
 	if errMarshal != nil {
