@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "workbuddy",
+      "name": "WorkBuddy",
+      "description": "WorkBuddy login, model discovery, token refresh and chat execution for CLIProxyAPI.",
+      "author": "WorkBuddy CPA Plugin",
+      "version": "0.1.0",
+      "repository": "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin",
+      "homepage": "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin",
+      "license": "MIT",
+      "tags": ["workbuddy", "oauth", "chat-completions", "model-provider"],
+      "auth_required": true,
+      "install": {
+        "type": "github-release"
+      }
+    }
+  ]
+}

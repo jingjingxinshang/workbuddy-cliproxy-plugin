@@ -1,0 +1,66 @@
+name: release
+
+on:
+  push:
+    tags:
+      - '[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: so
+          - goos: linux
+            goarch: arm64
+            ext: so
+          - goos: darwin
+            goarch: amd64
+            ext: dylib
+          - goos: darwin
+            goarch: arm64
+            ext: dylib
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: Install cross compilers
+        if: matrix.goos == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu
+      - name: Build plugin
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '1'
+        run: |
+          if [ "$GOOS/$GOARCH" = "linux/arm64" ]; then export CC=aarch64-linux-gnu-gcc; fi
+          if [ "$GOOS/$GOARCH" = "linux/amd64" ]; then export CC=x86_64-linux-gnu-gcc; fi
+          go build -buildmode=c-shared -o workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }} .
+          rm -f workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}.h
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create checksums
+        run: sha256sum dist/* > dist/SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
