@@ -5,7 +5,14 @@ package main
 #include <stdlib.h>
 
 typedef struct { void* ptr; size_t len; } cliproxy_buffer;
-typedef struct { uint32_t abi_version; void* host_ctx; void* call; void* free_buffer; } cliproxy_host_api;
+typedef void (*cliproxy_host_free_fn)(void*, size_t);
+typedef int (*cliproxy_host_call_fn)(void*, const char*, const uint8_t*, size_t, cliproxy_buffer*);
+typedef struct {
+	uint32_t abi_version;
+	void* host_ctx;
+	cliproxy_host_call_fn call;
+	cliproxy_host_free_fn free_buffer;
+} cliproxy_host_api;
 typedef int (*cliproxy_plugin_call_fn)(char*, uint8_t*, size_t, cliproxy_buffer*);
 typedef void (*cliproxy_plugin_free_fn)(void*, size_t);
 typedef void (*cliproxy_plugin_shutdown_fn)(void);
@@ -13,6 +20,23 @@ typedef struct { uint32_t abi_version; cliproxy_plugin_call_fn call; cliproxy_pl
 extern int cliproxyPluginCall(char*, uint8_t*, size_t, cliproxy_buffer*);
 extern void cliproxyPluginFree(void*, size_t);
 extern void cliproxyPluginShutdown(void);
+
+static const cliproxy_host_api* stored_host;
+
+static void store_host_api(const cliproxy_host_api* host) { stored_host = host; }
+
+static int call_host_api(const char* method, const uint8_t* request, size_t request_len, cliproxy_buffer* response) {
+	if (stored_host == NULL || stored_host->call == NULL) {
+		return 1;
+	}
+	return stored_host->call(stored_host->host_ctx, method, request, request_len, response);
+}
+
+static void free_host_buffer(void* ptr, size_t len) {
+	if (stored_host != NULL && stored_host->free_buffer != NULL && ptr != NULL) {
+		stored_host->free_buffer(ptr, len);
+	}
+}
 */
 import "C"
 
@@ -21,6 +45,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.1.7"
+	pluginVer   = "0.1.8"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 )
@@ -177,6 +202,7 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 		return 1
 	}
 	hostAPI = host
+	C.store_host_api(host)
 	plugin.abi_version = C.uint32_t(pluginabi.ABIVersion)
 	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
 	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
@@ -699,13 +725,90 @@ type billingEnvelope struct {
 // Empty response on any failure is deliberate: the management panel renders a
 // blank quota instead of a broken page when the upstream is unreachable or the
 // credential expired.
+// hostCall invokes a host callback over the C ABI and returns the RPC result
+// payload. The host answers with an envelope ({ok, result} / {ok, error}).
+func hostCall(method string, payload any) (json.RawMessage, error) {
+	if hostAPI == nil {
+		return nil, errors.New("host api unavailable")
+	}
+	var body []byte
+	if payload != nil {
+		encoded, errMarshal := json.Marshal(payload)
+		if errMarshal != nil {
+			return nil, errMarshal
+		}
+		body = encoded
+	}
+	cMethod := C.CString(method)
+	defer C.free(unsafe.Pointer(cMethod))
+	var request *C.uint8_t
+	if len(body) > 0 {
+		request = (*C.uint8_t)(C.CBytes(body))
+		defer C.free(unsafe.Pointer(request))
+	}
+	var response C.cliproxy_buffer
+	if C.call_host_api(cMethod, request, C.size_t(len(body)), &response) != 0 {
+		return nil, fmt.Errorf("host call %s failed", method)
+	}
+	if response.ptr == nil || response.len == 0 {
+		return nil, fmt.Errorf("host call %s returned no payload", method)
+	}
+	raw := C.GoBytes(response.ptr, C.int(response.len))
+	C.free_host_buffer(response.ptr, response.len)
+	var env struct {
+		OK     bool            `json:"ok"`
+		Result json.RawMessage `json:"result,omitempty"`
+		Error  *struct {
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+	if json.Unmarshal(raw, &env) != nil {
+		return nil, fmt.Errorf("host call %s returned invalid envelope", method)
+	}
+	if !env.OK {
+		message := "unknown host error"
+		if env.Error != nil && env.Error.Message != "" {
+			message = env.Error.Message
+		}
+		return nil, fmt.Errorf("host call %s failed: %s", method, message)
+	}
+	return env.Result, nil
+}
+
+// credentialJSONForQuota resolves the stored credential for a quota request.
+//
+// Quota fetches do NOT carry StorageJSON (only model discovery does), so the
+// credential has to be read back from the host through the auth callback. The
+// host returns the merged credential payload, which is the same JSON this
+// plugin originally returned from auth.login.poll / auth.parse.
+func credentialJSONForQuota(req pluginapi.QuotaFetchRequest) []byte {
+	if len(req.StorageJSON) > 0 {
+		return req.StorageJSON
+	}
+	authIndex := strings.TrimSpace(req.AuthIndex)
+	if authIndex == "" {
+		return nil
+	}
+	result, errCall := hostCall(pluginabi.MethodHostAuthGet, map[string]string{"auth_index": authIndex})
+	if errCall != nil {
+		return nil
+	}
+	var payload struct {
+		JSON json.RawMessage `json:"json"`
+	}
+	if json.Unmarshal(result, &payload) != nil {
+		return nil
+	}
+	return payload.JSON
+}
+
 func fetchQuota(raw []byte) pluginapi.QuotaFetchResponse {
 	var req pluginapi.QuotaFetchRequest
 	if json.Unmarshal(raw, &req) != nil {
 		return pluginapi.QuotaFetchResponse{}
 	}
 	var auth workbuddyAuth
-	if json.Unmarshal(req.StorageJSON, &auth) != nil || auth.AccessToken == "" {
+	if json.Unmarshal(credentialJSONForQuota(req), &auth) != nil || auth.AccessToken == "" {
 		return pluginapi.QuotaFetchResponse{}
 	}
 	profile := profiles[regionOf(auth)]
