@@ -36,12 +36,17 @@ jobs:
         run: |
           if [ "$GOOS/$GOARCH" = "linux/arm64" ]; then export CC=aarch64-linux-gnu-gcc; fi
           if [ "$GOOS/$GOARCH" = "linux/amd64" ]; then export CC=x86_64-linux-gnu-gcc; fi
-          go build -buildmode=c-shared -o workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }} .
-          rm -f workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}.h
+          raw="workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }}"
+          archive="workbuddy_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          go build -buildmode=c-shared -o "$raw" .
+          rm -f "${raw%.*}.h"
+          mkdir package
+          cp "$raw" package/workbuddy.so
+          (cd package && zip -q -j "../$archive" workbuddy.so)
       - uses: actions/upload-artifact@v4
         with:
           name: workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }}
+          path: workbuddy_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
 
   release:
     needs: build-linux
@@ -52,9 +57,11 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Create checksums
-        run: sha256sum dist/* > dist/SHA256SUMS
+        run: sha256sum dist/*.zip > dist/checksums.txt
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          files: dist/*
+          files: |
+            dist/*.zip
+            dist/checksums.txt
           generate_release_notes: true
