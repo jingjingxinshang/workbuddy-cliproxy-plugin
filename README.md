@@ -11,7 +11,8 @@
 - `/v3/config` 模型发现
 - `/v2/chat/completions` 普通和 SSE 请求
 - WorkBuddy 所需的 Origin、Referer、User-Agent、账号身份请求头
-- CPA Management API 资源入口
+- QuotaProvider：`/billing/meter/get-user-resource` 额度查询
+- 面板内登录页与额度页（跟随面板主题）
 - CPA Plugin Store Registry 发布结构
 
 ## 本地构建
@@ -93,13 +94,22 @@ curl -H "Authorization: Bearer <MANAGEMENT_KEY>" \
 
 `region` 取值 `cn`（中国大陆）或 `intl`（国际），决定使用哪个集群。
 
-插件同时注册了一个管理页面，在 CPA 管理面板中打开 `WorkBuddy` 菜单即可使用图形化登录：
+插件注册了两个资源页面，在 CPA 管理面板中分别打开 `WorkBuddy 登录` / `WorkBuddy 额度` 菜单即可进入：
 
 ```text
-/v0/resource/plugins/workbuddy/
+/v0/resource/plugins/workbuddy/          登录
+/v0/resource/plugins/workbuddy/quota     额度
 ```
 
-该页面在本机浏览器中填写管理密钥后调用上述两个端点，密钥只保存在浏览器 localStorage，不会发给插件。
+两个页面都在本机浏览器中填写管理密钥后调用 CPA 的管理接口，密钥只保存在浏览器 localStorage，不会发给插件。页面会读取面板持久化的主题（`cli-proxy-theme`），自动跟随面板的浅色/深色设置；读不到时回落到系统偏好。
+
+额度页存在的必要性：面板只为六个内置 provider 渲染额度（`QuotaProviderType` 是封闭联合类型），插件 provider 在面板里没有位置，因此插件用自己的资源页展示额度。页面调用的路由是：
+
+```text
+GET /v0/management/workbuddy/quota[?auth_index=...]
+```
+
+不带 `auth_index` 时取第一个 WorkBuddy 凭据。
 
 登录成功后，WorkBuddy 模型会出现在 CPA 的模型列表中。
 

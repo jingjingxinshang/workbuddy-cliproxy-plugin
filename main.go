@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.2.2"
+	pluginVer   = "0.2.3"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 )
@@ -953,8 +953,53 @@ func billingHeaders(auth workbuddyAuth) map[string]string {
 	return headers
 }
 
+// resourcePluginsPrefix is where the host mounts browser-navigable plugin
+// resources. It is a fixed host constant, so the plugin can recognize its own
+// pages without knowing the id the host derived from the library file name.
+const resourcePluginsPrefix = "/v0/resource/plugins/"
+
+// resourcePagePath reports the page path inside a plugin resource route.
+//
+// The plugin id segment is skipped rather than compared: the host derives it
+// from the library file name, so it is not necessarily the provider id.
+func resourcePagePath(path string) (string, bool) {
+	index := strings.Index(path, resourcePluginsPrefix)
+	if index < 0 {
+		return "", false
+	}
+	rest := path[index+len(resourcePluginsPrefix):]
+	if slash := strings.Index(rest, "/"); slash >= 0 {
+		rest = rest[slash:]
+	} else {
+		rest = "/"
+	}
+	page := strings.TrimRight(rest, "/")
+	if page == "" {
+		page = "/"
+	}
+	return page, true
+}
+
 func handleManagement(raw []byte) pluginapi.ManagementResponse {
 	path := strings.TrimRight(managementRequestPath(raw), "/")
+
+	// Resource pages come first.
+	//
+	// The host forwards both path spaces to this one handler with the full
+	// request path:
+	//
+	//	/v0/resource/plugins/workbuddy/quota   the page, which the panel loads in an iframe
+	//	/v0/management/workbuddy/quota         the route that page's script calls
+	//
+	// They overlap by suffix — the resource path also ends in "/workbuddy/quota"
+	// — so matching the route first answered the iframe navigation with the
+	// quota JSON, and the menu showed the raw payload instead of the page.
+	if page, okPage := resourcePagePath(path); okPage {
+		if page == "/quota" {
+			return htmlManagementResponse(quotaPageHTML())
+		}
+		return htmlManagementResponse(loginPageHTML())
+	}
 
 	// Plugin-owned route: quota for one credential.
 	//
@@ -962,7 +1007,7 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 	// (QuotaProviderType is a closed union), so a plugin provider has no place
 	// there. This route exists for the plugin's own resource page, which is the
 	// supported way for a plugin to draw its own data.
-	if strings.HasSuffix(path, "/workbuddy/quota") {
+	if strings.HasSuffix(path, "/"+providerID+"/quota") {
 		return quotaRouteResponse(raw)
 	}
 
@@ -984,10 +1029,10 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 		return jsonManagementResponse(body)
 	}
 
-	if strings.HasSuffix(path, "/quota") {
-		return htmlManagementResponse(quotaPageHTML())
-	}
-	return htmlManagementResponse(loginPageHTML())
+	// Resource pages are answered above, so anything left is an unregistered
+	// Management API path. Answering JSON keeps a typo'd route debuggable
+	// instead of silently returning a page.
+	return errorManagementResponse(http.StatusNotFound, "unknown plugin management path")
 }
 
 func jsonManagementResponse(body []byte) pluginapi.ManagementResponse {
@@ -1162,28 +1207,40 @@ func managementRequestPath(raw []byte) string {
 
 func loginPageHTML() string {
 	return `<!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>WorkBuddy 登录</title>
 <style>
- body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;padding:28px 22px;background:#111;color:#ddd}
- h1{font-size:19px;margin:0 0 4px}
- .sub{color:#999;margin-bottom:20px;font-size:13px}
- label{display:block;margin:14px 0 6px;color:#bbb;font-size:13px}
- select,input{width:100%;box-sizing:border-box;padding:9px 10px;border-radius:6px;border:1px solid #333;background:#1a1a1a;color:#eee;font-size:14px}
- button{margin-top:16px;padding:10px 16px;border-radius:6px;border:0;background:#2f6feb;color:#fff;font-size:14px;cursor:pointer}
- button:disabled{background:#333;color:#888;cursor:not-allowed}
+ *,*::before,*::after{box-sizing:border-box}` + themePalette + `
+ body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;
+   margin:0;padding:28px 22px;background:var(--bg);color:var(--text);
+   -webkit-font-smoothing:antialiased}
+ h1{font-size:20px;margin:0 0 4px}
+ .sub{color:var(--muted);margin-bottom:20px;font-size:13px}
+ label{display:block;margin:14px 0 6px;color:var(--muted);font-size:13px}
+ select,input{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(--line);
+   background:var(--panel);color:var(--text);font-size:14px;outline:none}
+ select:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,110,240,.15)}
+ button{margin-top:16px;padding:10px 16px;border-radius:8px;border:0;background:var(--accent);
+   color:#fff;font-size:14px;font-weight:500;cursor:pointer;transition:filter .15s}
+ button:hover{filter:brightness(1.08)}
+ button:disabled{background:var(--panel-2);color:var(--muted);cursor:not-allowed}
  .row{display:flex;gap:10px}
  .row>div{flex:1}
- .box{margin-top:18px;padding:12px 14px;border-radius:8px;background:#1a1a1a;border-left:3px solid #2f6feb;word-break:break-all}
- .err{border-left-color:#e78a8a;color:#f0b0b0}
- .ok{border-left-color:#6ee7a8;color:#a8f0c8}
- a{color:#7cc4ff}
- code{background:#222;padding:1px 5px;border-radius:4px}
- ol{padding-left:20px;color:#bbb}
+ .box{margin-top:18px;padding:12px 14px;border-radius:10px;background:var(--panel);
+   border:1px solid var(--line);border-left:3px solid var(--accent);word-break:break-all;
+   box-shadow:var(--shadow);color:var(--muted)}
+ .box.hint{border-left-color:var(--line)}
+ .err{border-left-color:var(--danger);color:var(--danger)}
+ .ok{border-left-color:var(--ok);color:var(--ok)}
+ a{color:var(--accent)}
+ code{background:var(--panel-2);padding:1px 5px;border-radius:4px;border:1px solid var(--line)}
+ ol{padding-left:20px;color:var(--muted)}
 </style>
+<script>` + themeBootScript + `</script>
 </head>
 <body>
 <h1>WorkBuddy</h1>
@@ -1202,7 +1259,7 @@ func loginPageHTML() string {
 
 <div id="out" class="box" style="display:none"></div>
 
-<div class="box" style="border-left-color:#444">
+<div class="box hint">
 <ol>
   <li>填写管理密钥，选择区域，点击「开始登录」。</li>
   <li>在浏览器打开返回的地址，用 WorkBuddy 客户端扫码或登录。</li>
