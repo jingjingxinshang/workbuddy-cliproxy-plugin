@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.1.9"
+	pluginVer   = "0.2.0"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 )
@@ -275,11 +275,27 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 	case pluginabi.MethodCommandLineExecute:
 		return okEnvelope(pluginapi.CommandLineExecutionResponse{Stdout: []byte("Use the CPA Management API to start WorkBuddy login.\n")})
 	case pluginabi.MethodManagementRegister:
-		return okEnvelope(managementRegistration{Resources: []pluginapi.ResourceRoute{{
-			Path:        "/",
-			Menu:        "WorkBuddy",
-			Description: "WorkBuddy 登录页面：选择区域、发起登录、查看状态",
-		}}})
+		return okEnvelope(managementRegistration{
+			Resources: []pluginapi.ResourceRoute{
+				{
+					Path:        "/",
+					Menu:        "WorkBuddy 登录",
+					Description: "WorkBuddy 登录页面：选择区域、发起登录、查看状态",
+				},
+				{
+					Path:        "/quota",
+					Menu:        "WorkBuddy 额度",
+					Description: "WorkBuddy 账号额度：剩余额度、套餐与重置时间",
+				},
+			},
+			Routes: []pluginapi.ManagementRoute{
+				{
+					Method:      "GET",
+					Path:        "/workbuddy/quota",
+					Description: "读取指定凭据的 WorkBuddy 额度",
+				},
+			},
+		})
 	case pluginabi.MethodManagementHandle:
 		return okEnvelope(handleManagement(raw))
 	case pluginabi.MethodQuotaDescribe:
@@ -938,8 +954,19 @@ func billingHeaders(auth workbuddyAuth) map[string]string {
 }
 
 func handleManagement(raw []byte) pluginapi.ManagementResponse {
-	path := managementRequestPath(raw)
-	if strings.HasSuffix(strings.TrimRight(path, "/"), "/status") {
+	path := strings.TrimRight(managementRequestPath(raw), "/")
+
+	// Plugin-owned route: quota for one credential.
+	//
+	// The management panel renders quota only for its six built-in providers
+	// (QuotaProviderType is a closed union), so a plugin provider has no place
+	// there. This route exists for the plugin's own resource page, which is the
+	// supported way for a plugin to draw its own data.
+	if strings.HasSuffix(path, "/workbuddy/quota") {
+		return quotaRouteResponse(raw)
+	}
+
+	if strings.HasSuffix(path, "/status") {
 		body, errMarshal := json.Marshal(map[string]any{
 			"provider": providerID,
 			"name":     pluginName,
@@ -949,21 +976,113 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 				"start":  "/v0/management/" + providerID + "-auth-url",
 				"status": "/v0/management/get-auth-status",
 			},
+			"quota": "/v0/management/workbuddy/quota",
 		})
 		if errMarshal != nil {
 			body = []byte(`{"provider":"workbuddy"}`)
 		}
+		return jsonManagementResponse(body)
+	}
+
+	if strings.HasSuffix(path, "/quota") {
+		return htmlManagementResponse(quotaPageHTML())
+	}
+	return htmlManagementResponse(loginPageHTML())
+}
+
+func jsonManagementResponse(body []byte) pluginapi.ManagementResponse {
+	return pluginapi.ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+		Body:       body,
+	}
+}
+
+func htmlManagementResponse(body string) pluginapi.ManagementResponse {
+	return pluginapi.ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       []byte(body),
+	}
+}
+
+// quotaRouteResponse answers GET /v0/management/workbuddy/quota?auth_index=...
+func quotaRouteResponse(raw []byte) pluginapi.ManagementResponse {
+	authIndex := managementQueryValue(raw, "auth_index")
+	if authIndex == "" {
+		authIndex = managementQueryValue(raw, "authIndex")
+	}
+	if authIndex == "" {
 		return pluginapi.ManagementResponse{
-			StatusCode: http.StatusOK,
+			StatusCode: http.StatusBadRequest,
+			Headers:    http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+			Body:       []byte(`{"error":"auth_index is required"}`),
+		}
+	}
+	request, errMarshal := json.Marshal(pluginapi.QuotaFetchRequest{AuthIndex: authIndex, Provider: providerID})
+	if errMarshal != nil {
+		return pluginapi.ManagementResponse{
+			StatusCode: http.StatusInternalServerError,
+			Headers:    http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+			Body:       []byte(`{"error":"failed to encode quota request"}`),
+		}
+	}
+	quota, errFetch := fetchQuota(request)
+	if errFetch != nil {
+		body, _ := json.Marshal(map[string]any{"error": errFetch.Error()})
+		return pluginapi.ManagementResponse{
+			StatusCode: http.StatusBadGateway,
 			Headers:    http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
 			Body:       body,
 		}
 	}
-	return pluginapi.ManagementResponse{
-		StatusCode: http.StatusOK,
-		Headers:    http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
-		Body:       []byte(loginPageHTML()),
+	body, errMarshal := json.Marshal(quota)
+	if errMarshal != nil {
+		return pluginapi.ManagementResponse{
+			StatusCode: http.StatusInternalServerError,
+			Headers:    http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+			Body:       []byte(`{"error":"failed to encode quota response"}`),
+		}
 	}
+	return jsonManagementResponse(body)
+}
+
+// managementQueryValue reads one query parameter case-insensitively. Values may
+// arrive as a string or an array of strings depending on how the host encoded
+// them.
+func managementQueryValue(raw []byte, key string) string {
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return ""
+	}
+	var query any
+	for name, value := range payload {
+		if strings.EqualFold(name, "query") {
+			query = value
+			break
+		}
+	}
+	values, okValues := query.(map[string]any)
+	if !okValues {
+		return ""
+	}
+	for name, value := range values {
+		if !strings.EqualFold(name, key) {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			return strings.TrimSpace(typed)
+		case []any:
+			if len(typed) == 0 {
+				return ""
+			}
+			if text, okText := typed[0].(string); okText {
+				return strings.TrimSpace(text)
+			}
+		}
+	}
+	return ""
 }
 
 // managementRequestPath reads the request path case-insensitively, because the
