@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-linux:
     strategy:
       matrix:
         include:
@@ -19,12 +19,6 @@ jobs:
           - goos: linux
             goarch: arm64
             ext: so
-          - goos: darwin
-            goarch: amd64
-            ext: dylib
-          - goos: darwin
-            goarch: arm64
-            ext: dylib
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,8 +43,35 @@ jobs:
           name: workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}
           path: workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }}
 
+  build-macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            goarch: amd64
+          - runner: macos-14
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: Build plugin
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '1'
+        run: |
+          go build -buildmode=c-shared -o workbuddy-darwin-${{ matrix.goarch }}.dylib .
+          rm -f workbuddy-darwin-${{ matrix.goarch }}.h
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workbuddy-darwin-${{ matrix.goarch }}
+          path: workbuddy-darwin-${{ matrix.goarch }}.dylib
+
   release:
-    needs: build
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
