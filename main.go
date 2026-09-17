@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.2.1"
+	pluginVer   = "0.2.2"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 )
