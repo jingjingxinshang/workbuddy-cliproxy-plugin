@@ -62,6 +62,19 @@ plugins:
 
 然后在 CPA 管理页面中搜索 `WorkBuddy`，执行安装和启用。
 
+### 关于 “需要认证”
+
+不要把 `auth_required` 写进 `registry.json`。CPA 管理面板的安装按钮逻辑是：
+
+```tsx
+const missingAuth = entry.authRequired && !entry.authConfigured;
+const actionDisabled = !connected || missingAuth || ...;
+```
+
+`auth_required: true` 表示“下载该插件需要先配置 `plugins.store-auth` 凭证”，只适用于私有仓库或需要鉴权的下载地址。公开仓库必须省略该字段，否则安装按钮会被禁用并显示“需要认证”。
+
+WorkBuddy 自身的账号登录属于插件运行时行为，由插件在安装并启用后通过 Management API 触发，与插件商店的 `store-auth` 无关。
+
 ## 登录
 
 插件启用后，通过 CPA Management API 的插件登录入口发起 WorkBuddy 登录。插件返回二维码/登录 URL，轮询完成后 CPA 会保存 `provider: workbuddy` 的 auth JSON。
