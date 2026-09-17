@@ -11,7 +11,6 @@
       "homepage": "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin",
       "license": "MIT",
       "tags": ["workbuddy", "oauth", "chat-completions", "model-provider"],
-      "auth_required": true,
       "install": {
         "type": "github-release"
       }
