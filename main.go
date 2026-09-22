@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.4"
+	pluginVer   = "0.3.5"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -630,7 +630,9 @@ func discoverModels(raw []byte) pluginapi.ModelResponse {
 }
 
 func execute(raw []byte, stream bool) ([]byte, error) {
-	var req pluginapi.ExecutorRequest
+	// The wire type, not pluginapi.ExecutorRequest: it carries the stream id this
+	// call must emit into.
+	var req executorWire
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
 	}
@@ -640,6 +642,12 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	}
 	profile := profiles[regionOf(auth)]
 	headers := chatHeaders(auth, profile)
+	// When the host opened a stream for this call, answer by emitting as the
+	// upstream produces. Buffering instead is what let long generations idle out:
+	// nothing was written to the client until the model finished.
+	if stream && req.StreamID != "" {
+		return executeStreaming(req.StreamID, profile.baseURL+"/v2/chat/completions", profile.origin, authUserAgent(auth, profile), headers, req.Payload)
+	}
 	status, body, err := upstreamWithin(chatTimeout, "POST", profile.baseURL+"/v2/chat/completions", profile.origin, authUserAgent(auth, profile), headers, req.Payload, stream)
 	if err != nil {
 		return errorEnvelope("upstream_error", err.Error(), http.StatusBadGateway), nil
