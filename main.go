@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.7"
+	pluginVer   = "0.3.8"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -454,6 +454,36 @@ func parseAuth(raw []byte) pluginapi.AuthParseResponse {
 // `/auth-files/download` reads <auth-dir>/<name> verbatim. Returning the
 // WorkBuddy uid here made the panel display (and try to download) a file that
 // never existed, because the credential on disk is named after FileName.
+// sessionDeadMarkers are the answers that mean the credential can never work
+// again without a fresh login, as opposed to a request that merely failed.
+//
+// The gateway kills the underlying offline session, after which the stored refresh
+// token is rejected outright. Retrying is pointless and the failure is silent: every
+// later call returns an HTML error page, which surfaces here as a parse failure and
+// reads like a plugin bug rather than a dead credential.
+var sessionDeadMarkers = []string{
+	"Offline user session not found",
+	"SESSION_EXPIRED",
+	"12153",
+}
+
+// refreshFailureIsTerminal reports whether a refresh failure means the credential
+// is finished. A transport error, a 5xx or a 429 is transient and must stay
+// retryable; only an authentication answer naming one of the dead-session markers
+// is terminal.
+func refreshFailureIsTerminal(status int, body []byte) bool {
+	if status != http.StatusUnauthorized && status != http.StatusForbidden {
+		return false
+	}
+	text := string(body)
+	for _, marker := range sessionDeadMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func authData(auth workbuddyAuth, fileName string) pluginapi.AuthData {
 	if fileName == "" {
 		fileName = providerID + ".json"
@@ -568,7 +598,22 @@ func refreshAuth(raw []byte) pluginapi.AuthRefreshResponse {
 	}
 	profile := profiles[regionOf(auth)]
 	status, body, err := upstream("POST", profile.baseURL+"/v2/plugin/auth/token/refresh", profile.origin, profile.userAgent, map[string]string{"X-Refresh-Token": auth.RefreshToken}, []byte("{}"), false)
-	if err != nil || status >= 400 {
+	if err != nil {
+		// Transient: an empty response leaves the credential as it is, and the
+		// host will ask again.
+		return pluginapi.AuthRefreshResponse{}
+	}
+	if refreshFailureIsTerminal(status, body) {
+		// The session is gone. Saying so once is better than failing every request
+		// that follows with an error nobody can attribute.
+		disabled := authData(auth, req.AuthID+".json")
+		disabled.Disabled = true
+		disabled.Metadata["status"] = "session_dead"
+		disabled.Metadata["status_detail"] = "上游离线会话已失效，需要重新登录"
+		warn("workbuddy credential %s: refresh session is dead (status=%d); disabling until a new login", req.AuthID, status)
+		return pluginapi.AuthRefreshResponse{Auth: disabled}
+	}
+	if status >= 400 {
 		return pluginapi.AuthRefreshResponse{}
 	}
 	var env serverEnvelope
