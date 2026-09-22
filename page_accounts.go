@@ -473,7 +473,6 @@ function matchesFilter(account) {
   if (state.filter === 'attention') return credential.cls === 'err';
   if (state.filter === 'risk') return percent !== null && percent <= 40;
   if (state.filter === 'claimed') return checkin.claimed;
-  if (state.filter === 'unknown') return checkin.cls === 'plain';
   return true;
 }
 
@@ -600,13 +599,20 @@ function accountCard(account) {
 // paintStats is the summary strip. "额度告警" counts the accounts at or under
 // 40% remaining, which is the same threshold the bars change colour at, so the
 // number and the wall agree.
+// paintStats is the summary strip.
+//
+// Only counters that can change a decision are shown. A check-in state of
+// "unknown" is deliberately not one of them: it is the normal answer whenever no
+// check-in activity is running (the footer says as much), so a card for it reads
+// like a fault while meaning "nothing to do". The alarm counters are shown only
+// when they are non-zero, because a permanent 0 is a card that never says
+// anything; their absence is the all-clear.
 function paintStats() {
   if (!state.accounts.length) { statsBox.innerHTML = ''; listheadBox.innerHTML = ''; return; }
   var usable = 0;
   var attention = 0;
   var risk = 0;
   var claimed = 0;
-  var unknown = 0;
   var remain = 0;
   var total = 0;
   state.accounts.forEach(function (account) {
@@ -618,7 +624,6 @@ function paintStats() {
     if (credential.cls === 'err') attention += 1;
     if (percent !== null && percent <= 40) risk += 1;
     if (view.claimed) claimed += 1;
-    if (view.cls === 'plain') unknown += 1;
     if (quota) {
       var remainMetric = metricOf(quota.summary, 'remain');
       var totalMetric = metricOf(quota.summary, 'total');
@@ -629,26 +634,35 @@ function paintStats() {
   var balance = total > 0
     ? '<div class="stat-sub">合计 ' + fmtNumber(remain) + ' / ' + fmtNumber(total) + ' credits</div>'
     : '<div class="stat-sub">等待额度读取</div>';
-  statsBox.innerHTML =
-    '<div class="stat"><div class="stat-top"><span class="dot plain">' + svg('user') + '</span>总账号</div>' +
-      '<div class="stat-num">' + state.accounts.length + '</div>' + balance + '</div>' +
-    '<div class="stat"><div class="stat-top"><span class="dot ok">' + svg('check') + '</span>可用</div>' +
-      '<div class="stat-num">' + usable + '</div><div class="stat-sub">凭据有效、可直接调用</div></div>' +
-    '<div class="stat"><div class="stat-top"><span class="dot err">' + svg('alert') + '</span>需处理</div>' +
-      '<div class="stat-num">' + attention + '</div><div class="stat-sub">凭据过期或缺少 token</div></div>' +
-    '<div class="stat"><div class="stat-top"><span class="dot warn">' + svg('chart') + '</span>额度告警</div>' +
-      '<div class="stat-num">' + risk + '</div><div class="stat-sub">剩余 40% 及以下</div></div>' +
-    '<div class="stat"><div class="stat-top"><span class="dot ok">' + svg('clock') + '</span>今日已签到</div>' +
-      '<div class="stat-num">' + claimed + '</div><div class="stat-sub">' + (state.accounts.length - claimed) + ' 个账号尚未签到</div></div>' +
-    '<div class="stat"><div class="stat-top"><span class="dot info">' + svg('shield') + '</span>状态未知</div>' +
-      '<div class="stat-num">' + unknown + '</div><div class="stat-sub">上游无签到活动或尚未读取</div></div>';
+  function card(tone, icon, label, value, sub) {
+    return '<div class="stat"><div class="stat-top"><span class="dot ' + tone + '">' + svg(icon) +
+      '</span>' + label + '</div><div class="stat-num">' + value + '</div>' +
+      '<div class="stat-sub">' + sub + '</div></div>';
+  }
+  var cards = [
+    card('plain', 'user', '总账号', state.accounts.length, balance.replace(/^<div class="stat-sub">|<\/div>$/g, '')),
+    card('ok', 'check', '可用', usable, '凭据有效、可直接调用'),
+  ];
+  if (attention) cards.push(card('err', 'alert', '需处理', attention, '凭据过期或缺少 token'));
+  if (risk) cards.push(card('warn', 'chart', '额度告警', risk, '剩余 40% 及以下'));
+  cards.push(card('ok', 'clock', '今日已签到', claimed,
+    (state.accounts.length - claimed) + ' 个账号尚未签到'));
+  statsBox.innerHTML = cards.join('');
 
-  var counts = { all: state.accounts.length, usable: usable, attention: attention, risk: risk, claimed: claimed, unknown: unknown };
+  // The same rule for the filters: a category with nothing in it is not a
+  // filter, it is a button that can only ever produce an empty list.
+  var counts = { all: state.accounts.length, usable: usable, attention: attention, risk: risk, claimed: claimed };
   var labels = [
     ['all', '全部'], ['usable', '可用'], ['attention', '需处理'],
-    ['risk', '额度告警'], ['claimed', '已签到'], ['unknown', '状态未知']
+    ['risk', '额度告警'], ['claimed', '已签到']
   ];
-  chipsBox.innerHTML = labels.map(function (pair) {
+  var active = labels.filter(function (pair) {
+    return pair[0] === 'all' || pair[0] === 'usable' || pair[0] === 'claimed' || counts[pair[0]] > 0;
+  });
+  // A filter whose category emptied out must not stay selected, or the wall
+  // would keep rendering an empty list with no way back except a reload.
+  if (!active.some(function (pair) { return pair[0] === state.filter; })) state.filter = 'all';
+  chipsBox.innerHTML = active.map(function (pair) {
     return '<button class="chip" type="button" aria-pressed="' + (state.filter === pair[0]) +
       '" data-filter="' + pair[0] + '">' + pair[1] + ' <b>' + counts[pair[0]] + '</b></button>';
   }).join('');
