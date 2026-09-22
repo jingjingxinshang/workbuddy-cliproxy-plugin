@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.5"
+	pluginVer   = "0.3.6"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -726,26 +726,20 @@ func fetchIdentity(profile regionProfile, token string) identityResponse {
 	return out
 }
 
-// splitSSE turns a buffered event stream into chunks, one per SSE event.
+// splitSSE turns a buffered event stream into chunks.
 //
-// Events are separated by a blank line, not by a newline, so the split is on
-// "\n\n" and each event is kept whole. Splitting on lines instead turned every
-// data line of a multi-line event into its own event, and turned keep-alive
-// comments (`: ping`) into events of their own, so a client reassembling the
-// stream saw events the server never sent.
-//
-// Scanning bytes rather than bufio lines also removes a size limit: a line longer
-// than bufio's maximum ended the scan, and because the scanner's error was never
-// read, the rest of the stream was dropped without a word.
+// It reuses the streaming accumulator so both paths frame identically. Framing on
+// blank lines, which is what the specification describes and what this used to do,
+// assumes one event is one line of data: the gateway can pretty-print a payload
+// across several lines, and splitting on the delimiter then hands the client half
+// a JSON object.
 func splitSSE(body []byte) []pluginapi.ExecutorStreamChunk {
-	normalized := bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n"))
-	chunks := make([]pluginapi.ExecutorStreamChunk, 0, 16)
-	for _, event := range bytes.Split(normalized, []byte("\n\n")) {
-		trimmed := bytes.TrimSpace(event)
-		if len(trimmed) == 0 {
-			continue
-		}
-		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: append(append([]byte(nil), trimmed...), '\n', '\n')})
+	acc := &sseAccumulator{}
+	events := acc.push(body)
+	events = append(events, acc.flush()...)
+	chunks := make([]pluginapi.ExecutorStreamChunk, 0, len(events))
+	for _, event := range events {
+		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: event})
 	}
 	if len(chunks) == 0 && len(body) > 0 {
 		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: body})

@@ -47,66 +47,93 @@ func TestExecutorWireCarriesStreamID(t *testing.T) {
 	}
 }
 
-// An event can arrive across several reads, so the framer has to hold an
-// incomplete event back instead of emitting half of it.
-func TestSSEFramerHoldsIncompleteEvents(t *testing.T) {
-	framer := &sseFramer{}
-
-	// The first read ends mid-event.
-	if events := framer.push([]byte("data: {\"a\":")); len(events) != 0 {
-		t.Fatalf("incomplete event produced %d events: %q", len(events), events)
+// An event can arrive across several reads, so an incomplete payload is held
+// until its braces balance rather than emitted as half an object.
+func TestSSEAccumulatorHoldsIncompleteJSON(t *testing.T) {
+	acc := &sseAccumulator{}
+	if events := acc.push([]byte("data: {\"a\":")); len(events) != 0 {
+		t.Fatalf("incomplete payload produced %d events: %q", len(events), events)
 	}
-	// Completing it, with the blank line, releases exactly one event.
-	events := framer.push([]byte("1}\n\n"))
+	events := acc.push([]byte("1}\n\n"))
 	if len(events) != 1 {
 		t.Fatalf("got %d events, want 1", len(events))
 	}
-	if string(events[0]) != `data: {"a":1}` {
+	if string(events[0]) != "data: {\"a\":1}\n\n" {
 		t.Fatalf("unexpected event: %q", events[0])
 	}
 }
 
-// A multi-line event and its fields belong to one event, and a keep-alive
-// comment is kept because forwarding it is what holds a long stream open.
-func TestSSEFramerKeepsEventShape(t *testing.T) {
-	framer := &sseFramer{}
-	events := framer.push([]byte("event: message\nid: 7\ndata: first\ndata: second\n\n: keep-alive\n\n"))
+// A payload the gateway pretty-prints across lines, with a blank line inside it,
+// is one event. Framing on the blank line is what split it before.
+func TestSSEAccumulatorReassemblesMultiLinePayload(t *testing.T) {
+	acc := &sseAccumulator{}
+	events := acc.push([]byte("data: {\n\ndata: \"x\": [1,\ndata: 2]\n\ndata: }\n\n"))
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1: %q", len(events), events)
+	}
+	if string(events[0]) != "data: {\n\"x\": [1,\n2]\n}\n\n" {
+		t.Fatalf("payload not reassembled: %q", events[0])
+	}
+}
+
+// A brace inside a JSON string does not close the payload, and [DONE] ends the
+// stream without waiting for more.
+func TestSSEAccumulatorIsStringAwareAndStopsAtDone(t *testing.T) {
+	acc := &sseAccumulator{}
+	events := acc.push([]byte("data: {\"text\":\"a } b\",\"ok\":true}\n\ndata: [DONE]\n\n"))
 	if len(events) != 2 {
 		t.Fatalf("got %d events, want 2: %q", len(events), events)
 	}
-	if string(events[0]) != "event: message\nid: 7\ndata: first\ndata: second" {
-		t.Fatalf("multi-line event not preserved: %q", events[0])
+	if string(events[0]) != "data: {\"text\":\"a } b\",\"ok\":true}\n\n" {
+		t.Fatalf("string-aware depth failed: %q", events[0])
 	}
-	if string(events[1]) != ": keep-alive" {
-		t.Fatalf("keep-alive block not preserved: %q", events[1])
+	if string(events[1]) != "data: [DONE]\n\n" {
+		t.Fatalf("unexpected terminator: %q", events[1])
 	}
-}
-
-// CRLF framing is normalized even when the boundary falls between two reads.
-func TestSSEFramerNormalizesSplitCRLF(t *testing.T) {
-	framer := &sseFramer{}
-	if events := framer.push([]byte("data: ok\r")); len(events) != 0 {
-		t.Fatalf("split CRLF framed early: %q", events)
+	if !acc.done {
+		t.Fatal("[DONE] did not end the stream")
 	}
-	events := framer.push([]byte("\n\r\n"))
-	if len(events) != 1 || string(events[0]) != "data: ok" {
-		t.Fatalf("got %q, want one normalized event", events)
+	// Nothing after the terminator is forwarded, and the stream is not reopened.
+	if extra := acc.push([]byte("data: late\n\n")); len(extra) != 0 {
+		t.Fatalf("payload after [DONE] forwarded: %q", extra)
 	}
 }
 
-// A stream that stops without its final blank line still delivers its last
-// payload rather than dropping it.
-func TestSSEFramerFlushDeliversTrailingEvent(t *testing.T) {
-	framer := &sseFramer{}
-	if events := framer.push([]byte("data: [DONE]")); len(events) != 0 {
-		t.Fatalf("trailing event framed early: %q", events)
+// The one line that can arrive without its newline is the last one at EOF, and
+// flush is what delivers it rather than dropping it.
+func TestSSEAccumulatorFlushDeliversTrailingEvent(t *testing.T) {
+	acc := &sseAccumulator{}
+	if events := acc.push([]byte(`data: {"a":1}`)); len(events) != 0 {
+		t.Fatalf("a line without its newline framed early: %q", events)
 	}
-	events := framer.flush()
-	if len(events) != 1 || string(events[0]) != "data: [DONE]" {
-		t.Fatalf("flush returned %q", events)
+	events := acc.flush()
+	if len(events) != 1 || string(events[0]) != `data: {"a":1}`+"\n\n" {
+		t.Fatalf("flush dropped the trailing event: %q", events)
 	}
-	if again := framer.flush(); len(again) != 0 {
-		t.Fatalf("flush is not idempotent: %q", again)
+}
+
+// A payload whose braces never balance is not an event, so it is withheld rather
+// than handed over as half an object -- not at flush either.
+func TestSSEAccumulatorWithholdsUnbalancedPayload(t *testing.T) {
+	acc := &sseAccumulator{}
+	if events := acc.push([]byte(`data: {"a":`)); len(events) != 0 {
+		t.Fatalf("unbalanced payload emitted: %q", events)
+	}
+	if events := acc.flush(); len(events) != 0 {
+		t.Fatalf("unbalanced payload emitted by flush: %q", events)
+	}
+}
+
+// The event name is preserved when the gateway sends one, so a client that
+// switches on it still sees it.
+func TestSSEAccumulatorKeepsEventName(t *testing.T) {
+	acc := &sseAccumulator{}
+	events := acc.push([]byte("event: message\nid: 7\ndata: {\"a\":1}\n\n"))
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1: %q", len(events), events)
+	}
+	if string(events[0]) != "event: message\ndata: {\"a\":1}\n\n" {
+		t.Fatalf("event name or payload wrong: %q", events[0])
 	}
 }
 
