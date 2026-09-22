@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -25,6 +26,42 @@ func TestSplitSSE(t *testing.T) {
 	}
 	if string(chunks[0].Payload) != "data: {\"a\":1}\n\n" {
 		t.Fatalf("unexpected first chunk: %q", chunks[0].Payload)
+	}
+
+	// A multi-line event and its event/id fields belong to ONE chunk: the
+	// separator is a blank line, not a line break.
+	multi := "event: message\nid: 7\ndata: first\ndata: second\n\n"
+	chunks = splitSSE([]byte(multi))
+	if len(chunks) != 1 {
+		t.Fatalf("multi-line event split into %d chunks, want 1: %q", len(chunks), chunks)
+	}
+	if string(chunks[0].Payload) != multi {
+		t.Fatalf("multi-line event not preserved: %q", chunks[0].Payload)
+	}
+
+	// A keep-alive comment is its own block (blank-line separated) and is kept:
+	// forwarding it is what holds a long stream open, and clients ignore it. CRLF
+	// framing is normalized so the client sees the same bytes either way.
+	chunks = splitSSE([]byte(": keep-alive\n\ndata: ok\r\n\r\n"))
+	if len(chunks) != 2 {
+		t.Fatalf("comment + event produced %d chunks, want 2", len(chunks))
+	}
+	if string(chunks[0].Payload) != ": keep-alive\n\n" {
+		t.Fatalf("keep-alive block not preserved: %q", chunks[0].Payload)
+	}
+	if string(chunks[1].Payload) != "data: ok\n\n" {
+		t.Fatalf("CRLF event not normalized: %q", chunks[1].Payload)
+	}
+
+	// A single event larger than bufio's 4MiB line limit used to end the scan
+	// silently and drop the remainder of the stream.
+	big := "data: " + strings.Repeat("x", 5<<20) + "\n\ndata: [DONE]\n\n"
+	chunks = splitSSE([]byte(big))
+	if len(chunks) != 2 {
+		t.Fatalf("large event produced %d chunks, want 2 (the tail was dropped)", len(chunks))
+	}
+	if !bytes.HasSuffix(chunks[1].Payload, []byte("data: [DONE]\n\n")) {
+		t.Fatalf("tail event lost: %q", chunks[1].Payload)
 	}
 }
 

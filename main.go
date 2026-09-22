@@ -41,7 +41,6 @@ static void free_host_buffer(void* ptr, size_t len) {
 import "C"
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -66,6 +65,12 @@ const (
 	pluginVer   = "0.3.0"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
+	// chatTimeout bounds one chat request. It has to exist separately because
+	// upstream's default budget is pollTimeout, which is the login-poll budget:
+	// reusing it for chat cut off every answer that took longer than 20 seconds,
+	// and reported it as a bare context deadline rather than anything that named
+	// the real cause.
+	chatTimeout = 10 * time.Minute
 
 	// defaultRegion is the cluster used when neither the request metadata nor
 	// the plugin configuration names a usable one.
@@ -635,7 +640,7 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	}
 	profile := profiles[regionOf(auth)]
 	headers := chatHeaders(auth, profile)
-	status, body, err := upstream("POST", profile.baseURL+"/v2/chat/completions", profile.origin, authUserAgent(auth, profile), headers, req.Payload, stream)
+	status, body, err := upstreamWithin(chatTimeout, "POST", profile.baseURL+"/v2/chat/completions", profile.origin, authUserAgent(auth, profile), headers, req.Payload, stream)
 	if err != nil {
 		return errorEnvelope("upstream_error", err.Error(), http.StatusBadGateway), nil
 	}
@@ -712,16 +717,27 @@ func fetchIdentity(profile regionProfile, token string) identityResponse {
 	}
 	return out
 }
+
+// splitSSE turns a buffered event stream into chunks, one per SSE event.
+//
+// Events are separated by a blank line, not by a newline, so the split is on
+// "\n\n" and each event is kept whole. Splitting on lines instead turned every
+// data line of a multi-line event into its own event, and turned keep-alive
+// comments (`: ping`) into events of their own, so a client reassembling the
+// stream saw events the server never sent.
+//
+// Scanning bytes rather than bufio lines also removes a size limit: a line longer
+// than bufio's maximum ended the scan, and because the scanner's error was never
+// read, the rest of the stream was dropped without a word.
 func splitSSE(body []byte) []pluginapi.ExecutorStreamChunk {
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	scanner.Buffer(make([]byte, 4096), 4<<20)
-	chunks := []pluginapi.ExecutorStreamChunk{}
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
+	normalized := bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n"))
+	chunks := make([]pluginapi.ExecutorStreamChunk, 0, 16)
+	for _, event := range bytes.Split(normalized, []byte("\n\n")) {
+		trimmed := bytes.TrimSpace(event)
+		if len(trimmed) == 0 {
 			continue
 		}
-		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: append(append([]byte(nil), line...), '\n', '\n')})
+		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: append(append([]byte(nil), trimmed...), '\n', '\n')})
 	}
 	if len(chunks) == 0 && len(body) > 0 {
 		chunks = append(chunks, pluginapi.ExecutorStreamChunk{Payload: body})
