@@ -841,15 +841,15 @@ type billingEnvelope struct {
 		Response struct {
 			Data struct {
 				Accounts []struct {
-					AccountID           int     `json:"AccountId"`
-					PackageName         string  `json:"PackageName"`
-					PackageCode         string  `json:"PackageCode"`
-					CapacityRemain      float64 `json:"CapacityRemain"`
-					CapacitySize        float64 `json:"CapacitySize"`
-					CycleCapacityRemain float64 `json:"CycleCapacityRemain"`
-					CycleCapacitySize   float64 `json:"CycleCapacitySize"`
-					CycleEndTime        string  `json:"CycleEndTime"`
-					Status              int     `json:"Status"`
+					AccountID           int      `json:"AccountId"`
+					PackageName         string   `json:"PackageName"`
+					PackageCode         string   `json:"PackageCode"`
+					CapacityRemain      *float64 `json:"CapacityRemain"`
+					CapacitySize        *float64 `json:"CapacitySize"`
+					CycleCapacityRemain *float64 `json:"CycleCapacityRemain"`
+					CycleCapacitySize   *float64 `json:"CycleCapacitySize"`
+					CycleEndTime        string   `json:"CycleEndTime"`
+					Status              int      `json:"Status"`
 				} `json:"Accounts"`
 			} `json:"Data"`
 		} `json:"Response"`
@@ -976,6 +976,14 @@ func fetchQuota(raw []byte) (pluginapi.QuotaFetchResponse, error) {
 	if status >= 400 {
 		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("billing endpoint returned HTTP %d: %s", status, truncate(string(body), 200))
 	}
+	return quotaFromBilling(body)
+}
+
+// quotaFromBilling maps a billing response onto the host's quota shape.
+//
+// It is separate from the request so the mapping can be tested directly: the bug
+// it was extracted for was a value-semantics mistake, not a networking one.
+func quotaFromBilling(body []byte) (pluginapi.QuotaFetchResponse, error) {
 	var env billingEnvelope
 	if errUnmarshal := json.Unmarshal(body, &env); errUnmarshal != nil {
 		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("billing response is not JSON: %s", truncate(string(body), 200))
@@ -990,14 +998,7 @@ func fetchQuota(raw []byte) (pluginapi.QuotaFetchResponse, error) {
 	resp := pluginapi.QuotaFetchResponse{}
 	var totalRemain, totalSize float64
 	for _, account := range accounts {
-		remain := account.CycleCapacityRemain
-		if remain == 0 {
-			remain = account.CapacityRemain
-		}
-		size := account.CycleCapacitySize
-		if size == 0 {
-			size = account.CapacitySize
-		}
+		remain, size := capacityPair(account.CycleCapacityRemain, account.CycleCapacitySize, account.CapacityRemain, account.CapacitySize)
 		totalRemain += remain
 		totalSize += size
 		name := firstNonEmpty(account.PackageName, account.PackageCode, "WorkBuddy")
@@ -1028,6 +1029,31 @@ func fetchQuota(raw []byte) (pluginapi.QuotaFetchResponse, error) {
 	plan := firstNonEmpty(accounts[0].PackageName, accounts[0].PackageCode)
 	resp.Subscription = &pluginapi.QuotaSubscription{Plan: plan, TierName: plan}
 	return resp, nil
+}
+
+// capacityPair picks the capacity figures that describe current consumption.
+//
+// The cycle figures win when the API sent them: that is the pair that resets and
+// the one that tracks what has been spent. The package figures are the fallback
+// for accounts that carry only lifetime numbers.
+//
+// The parameters are pointers because an omitted field and a spent-out package
+// are not the same thing: a used-up cycle reports a real 0. Held as float64, the
+// two were indistinguishable, so an exhausted 500-credit package fell through to
+// the package figure and displayed 500 remaining.
+func capacityPair(cycleRemain, cycleSize, packageRemain, packageSize *float64) (remain, size float64) {
+	if cycleRemain != nil || cycleSize != nil {
+		return capacityValue(cycleRemain), capacityValue(cycleSize)
+	}
+	return capacityValue(packageRemain), capacityValue(packageSize)
+}
+
+// capacityValue dereferences a capacity field, treating an absent one as zero.
+func capacityValue(value *float64) float64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func billingHeaders(auth workbuddyAuth) map[string]string {
