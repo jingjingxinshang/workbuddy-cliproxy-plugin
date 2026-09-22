@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.6"
+	pluginVer   = "0.3.7"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -71,6 +71,16 @@ const (
 	// and reported it as a bare context deadline rather than anything that named
 	// the real cause.
 	chatTimeout = 10 * time.Minute
+
+	// billingConcurrency is how many billing reads may overlap process-wide.
+	billingConcurrency = 4
+	// billingTimeout bounds one billing attempt, so a hung read cannot hold a
+	// concurrency slot indefinitely.
+	billingTimeout = 20 * time.Second
+	// billingAttempts and billingBackoff describe the retry of a billing read.
+	// Only transport failures and 5xx are retried: a 4xx or a business error is
+	// an answer, and repeating it just spends the limiter.
+	billingAttempts = 3
 
 	// defaultRegion is the cluster used when neither the request metadata nor
 	// the plugin configuration names a usable one.
@@ -222,6 +232,13 @@ var (
 	hostAPI *C.cliproxy_host_api
 	loginMu sync.Mutex
 	logins  = map[string]loginState{}
+
+	// billingSlots bounds how many billing reads are in flight at once. The
+	// endpoint answers 500 under concurrent load -- the reference plugin carries
+	// the same limiter for the same reason -- and the panel can ask for several
+	// accounts at once, so without this a routine page load can look like an
+	// upstream outage.
+	billingSlots = make(chan struct{}, billingConcurrency)
 
 	configMu  sync.RWMutex
 	pluginCfg = pluginConfig{DefaultRegion: defaultRegion}
@@ -971,7 +988,7 @@ func fetchQuota(raw []byte) (pluginapi.QuotaFetchResponse, error) {
 	if errMarshal != nil {
 		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("encode billing request: %w", errMarshal)
 	}
-	status, body, errCall := upstream("POST", profile.baseURL+"/billing/meter/get-user-resource", profile.origin, billingUserAgent, billingHeaders(auth), payload, false)
+	status, body, errCall := billingRead(profile, auth, payload)
 	if errCall != nil {
 		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("billing request failed: %w", errCall)
 	}
@@ -1056,6 +1073,42 @@ func capacityValue(value *float64) float64 {
 		return 0
 	}
 	return *value
+}
+
+// billingRead performs one billing read through the concurrency limiter, with a
+// bounded retry for the failures that are worth repeating.
+//
+// The limiter is held across the retries, not acquired per attempt: the point is
+// to cap how many billing requests reach the gateway at once, and releasing
+// between attempts would let a retry storm do exactly what the limit exists to
+// prevent.
+func billingRead(profile regionProfile, auth workbuddyAuth, payload []byte) (int, []byte, error) {
+	billingSlots <- struct{}{}
+	defer func() { <-billingSlots }()
+
+	var (
+		status  int
+		body    []byte
+		errCall error
+	)
+	for attempt := 0; attempt < billingAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*300) * time.Millisecond)
+		}
+		status, body, errCall = upstreamWithin(billingTimeout, "POST", profile.baseURL+"/billing/meter/get-user-resource", profile.origin, billingUserAgent, billingHeaders(auth), payload, false)
+		if errCall == nil && !isTransientBillingStatus(status) {
+			return status, body, nil
+		}
+		warn("billing read attempt %d/%d failed: status=%d err=%v", attempt+1, billingAttempts, status, errCall)
+	}
+	return status, body, errCall
+}
+
+// isTransientBillingStatus reports whether a status is worth repeating. Only 5xx
+// qualifies: 4xx is a decision about this request, and a business error inside a
+// 200 is an answer that parsing will surface.
+func isTransientBillingStatus(status int) bool {
+	return status >= 500
 }
 
 func billingHeaders(auth workbuddyAuth) map[string]string {

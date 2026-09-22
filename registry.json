@@ -6,7 +6,7 @@
       "name": "WorkBuddy",
       "description": "WorkBuddy login, model discovery, token refresh and chat execution for CLIProxyAPI.",
       "author": "WorkBuddy CPA Plugin",
-      "version": "0.3.6",
+      "version": "0.3.7",
       "repository": "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin",
       "homepage": "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin",
       "license": "MIT",

@@ -65,6 +65,18 @@ func hostStreamEmit(streamID string, payload []byte) error {
 	return err
 }
 
+// hostStreamEmitError pushes a chunk that carries an error rather than a payload.
+// The host turns the message into the stream chunk's error, which is how a
+// truncated or empty upstream is surfaced instead of ending the answer silently.
+func hostStreamEmitError(streamID, message string) {
+	if streamID == "" || message == "" {
+		return
+	}
+	if _, err := hostCall("host.stream.emit", streamEmitRequest{StreamID: streamID, Error: message}); err != nil {
+		warn("stream emit (error frame) failed: %v", err)
+	}
+}
+
 // hostStreamClose ends the stream. An empty message means it finished; anything
 // else is reported to the client as the stream's error.
 func hostStreamClose(streamID, message string) {
@@ -312,6 +324,7 @@ func executeStreaming(streamID, target, origin, userAgent string, extra map[stri
 	acc := &sseAccumulator{}
 	reader := bufio.NewReaderSize(resp.Body, 64<<10)
 	emitted := 0
+	var readErr error
 	emit := func(event []byte) bool {
 		if errEmit := hostStreamEmit(streamID, event); errEmit != nil {
 			warn("stream emit refused after %d events (client gone?): %v", emitted, errEmit)
@@ -341,6 +354,7 @@ func executeStreaming(streamID, target, origin, userAgent string, extra map[stri
 		if errRead != nil {
 			if !errors.Is(errRead, io.EOF) && ctx.Err() == nil {
 				warn("chat stream read stopped after %d events: %v", emitted, errRead)
+				readErr = errRead
 			}
 			break
 		}
@@ -351,6 +365,16 @@ func executeStreaming(streamID, target, origin, userAgent string, extra map[stri
 		}
 	}
 
+	// A stream that produced nothing at all is not an answer, and ending quietly
+	// made it look like one: the client saw an empty completion with no reason.
+	if emitted == 0 && ctx.Err() == nil {
+		hostStreamEmitError(streamID, "upstream stream ended without a single event")
+	}
+	// A read that stopped for any reason other than an ending stream is a
+	// truncated answer, and the reader has to be told which.
+	if readErr != nil && !errors.Is(readErr, io.EOF) && ctx.Err() == nil {
+		hostStreamEmitError(streamID, "upstream stream read error: "+readErr.Error())
+	}
 	// A cancelled context is a reader that went away or a timeout we already
 	// logged; either way the client is told, and the upstream request is already
 	// torn down with it.
