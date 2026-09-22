@@ -172,20 +172,7 @@ func accountsPageHTML() string {
  .pill.warn{background:var(--warn-bg);color:var(--warn)}
  .pill.err{background:var(--danger-bg);color:var(--danger)}
  .pill.plain{background:var(--panel-2);color:var(--muted)}
- .tags{display:flex;gap:6px;flex-wrap:wrap;padding:0 16px 12px}
- .tag{padding:3px 9px;border-radius:8px;background:var(--panel-2);border:1px solid var(--line);
-   font-size:11.5px;color:var(--muted);white-space:nowrap}
- .tag b{color:var(--text);font-weight:600}
 
- .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;padding:12px 16px;
-   border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:var(--panel-2)}
- .metric{min-width:0}
- .metric em{display:flex;align-items:center;gap:4px;font-style:normal;font-size:11px;
-   color:var(--faint);white-space:nowrap}
- .metric strong{display:block;font-size:14.5px;font-weight:650;margin-top:3px;
-   font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis}
- .metric strong.ok{color:var(--ok)} .metric strong.warn{color:var(--warn)}
- .metric strong.err{color:var(--danger)}
 
  .quota{padding:13px 16px 4px}
  .quota h4{margin:0 0 10px;font-size:12px;font-weight:600;color:var(--muted);
@@ -203,6 +190,10 @@ func accountsPageHTML() string {
    font-size:11.5px;color:var(--faint)}
  .pkg-foot .soon{color:var(--warn);font-weight:600}
 
+ .quota-total{display:flex;align-items:baseline;gap:6px;font-size:12.5px;color:var(--muted);
+   margin-bottom:11px}
+ .quota-total b{color:var(--text);font-weight:650;font-variant-numeric:tabular-nums}
+ .foot-note{font-size:11.5px;color:var(--faint);white-space:nowrap}
  .card-foot{display:flex;align-items:center;gap:8px;padding:11px 16px;margin-top:auto;
    border-top:1px solid var(--line);background:var(--panel-2)}
  .card-foot .spacer{flex:1 1 auto}
@@ -224,7 +215,6 @@ func accountsPageHTML() string {
  .sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
    clip:rect(0 0 0 0);white-space:nowrap;border:0}
  @media (max-width:640px){
-   .metrics{grid-template-columns:repeat(2,1fr)}
    input[type=password]{width:130px}
  }
 </style>
@@ -236,7 +226,7 @@ func accountsPageHTML() string {
     <div class="logo">WB</div>
     <div>
       <h1>WorkBuddy 账号</h1>
-      <p>额度、凭据状态与每日签到 · provider workbuddy</p>
+      <p>额度与每日签到</p>
     </div>
   </div>
   <div class="actions">
@@ -249,7 +239,7 @@ func accountsPageHTML() string {
 <main>
   <div id="stats" class="stats"></div>
 
-  <section class="filters">
+  <section class="filters" id="filters" style="display:none">
     <div id="chips" class="chips"></div>
     <div class="filters-row">
       <div class="grow">
@@ -290,6 +280,13 @@ var checkinAllButton = document.getElementById('checkin-all');
 // and pending tracks in-flight reads so a card can show a spinner without the
 // whole list re-rendering.
 var state = { accounts: [], quota: {}, errors: {}, pending: {}, runs: {}, filter: 'all', query: '', sort: 'risk' };
+
+// Summary and filter chrome cost attention, so they only appear once there are
+// enough accounts that the wall cannot be read at a glance. With a single
+// account a card saying "总账号 1", a filter row whose every entry reads "1" and a
+// sort control that cannot reorder anything are furniture.
+var SUMMARY_MIN_ACCOUNTS = 4;
+var FILTER_MIN_ACCOUNTS = 6;
 
 try { keyInput.value = localStorage.getItem('wbaw_mgmt_key') || ''; } catch (e) {}
 
@@ -523,31 +520,6 @@ function pkgRows(quota) {
   }).join('');
 }
 
-// metricRow is the card's four headline numbers. They are the figures the plugin
-// actually has (balance, spend, package count), not a template of ones it does
-// not.
-function metricRow(quota) {
-  var remain = metricOf(quota.summary, 'remain');
-  var total = metricOf(quota.summary, 'total');
-  var usedMetric = metricOf(quota.summary, 'used_percent');
-  var percent = remainingPercent(quota);
-  var used = usedMetric && typeof usedMetric.value === 'number'
-    ? usedMetric.value
-    : (percent === null ? null : 100 - percent);
-  var unit = (remain && remain.unit) ? ' ' + remain.unit : '';
-  var packages = (quota.groups || []).length;
-  function cell(icon, label, value, cls) {
-    return '<div class="metric"><em>' + svg(icon) + esc(label) + '</em>' +
-      '<strong' + (cls ? ' class="' + cls + '"' : '') + ' title="' + esc(value) + '">' + esc(value) + '</strong></div>';
-  }
-  return '<div class="metrics">' +
-    cell('wallet', '剩余', remain ? fmtNumber(remain.value) + unit : '-', percent === null ? '' : tone(percent)) +
-    cell('box', '总额', total ? fmtNumber(total.value) + unit : '-', '') +
-    cell('chart', '已用', used === null ? '-' : used.toFixed(1) + '%', '') +
-    cell('shield', '套餐', packages ? String(packages) + ' 个' : '-', '') +
-  '</div>';
-}
-
 function quotaBody(account) {
   var key = account.auth_index;
   if (state.pending[key]) {
@@ -559,9 +531,20 @@ function quotaBody(account) {
     return '<div class="quota"><div class="inline-state err">' + esc(message) +
       ' <button class="ghost" type="button" data-quota="' + esc(key) + '">重试</button></div></div>';
   }
-  return metricRow(quota) + '<div class="quota"><h4>额度明细<span>' +
-    ((quota.groups || []).length ? (quota.groups || []).length + ' 项' : '暂无套餐') + '</span></h4>' +
-    (pkgRows(quota) || '<div class="inline-state">上游没有返回套餐明细。</div>') + '</div>';
+  var groups = quota.groups || [];
+  if (!groups.length) {
+    return '<div class="quota"><div class="inline-state">上游没有返回套餐明细。</div></div>';
+  }
+  var totalLine = '';
+  if (groups.length > 1) {
+    var remainMetric = metricOf(quota.summary, 'remain');
+    var totalMetric = metricOf(quota.summary, 'total');
+    var unit = (remainMetric && remainMetric.unit) ? ' ' + remainMetric.unit : '';
+    totalLine = '<div class="quota-total">合计 <b>' +
+      esc(fmtNumber(remainMetric ? remainMetric.value : null)) + '</b> / ' +
+      esc(fmtNumber(totalMetric ? totalMetric.value : null)) + esc(unit) + '</div>';
+  }
+  return '<div class="quota">' + totalLine + pkgRows(quota) + '</div>';
 }
 
 function accountCard(account) {
@@ -570,25 +553,27 @@ function accountCard(account) {
   var view = checkinView(account.checkin);
   var label = accountLabel(account);
   var initial = String(label).trim().charAt(0).toUpperCase() || 'W';
-  var tags = [];
-  if (account.region) tags.push('<span class="tag">区域 <b>' + esc(account.region) + '</b></span>');
-  if (account.uid) tags.push('<span class="tag">UID <b>' + esc(account.uid) + '</b></span>');
-  if (account.enterprise_id) tags.push('<span class="tag">企业 <b>' + esc(account.enterprise_id) + '</b></span>');
-  if (account.expires_at) tags.push('<span class="tag">到期 <b>' + esc(fmtStamp(account.expires_at)) + '</b></span>');
-  tags.push('<span class="tag">签到 <b>' + esc(view.text) + '</b></span>');
-
+  // The expiry is the one fact worth a line under the name: a credential that
+  // stops refreshing shows up here before it shows up as a failed request. It
+  // replaced the credential filename, which was an opaque id that told the
+  // reader nothing about which account they were looking at.
+  var sub = account.expires_at ? '到期 ' + fmtStamp(account.expires_at) : '';
+  // The check-in state is stated once, by the button, and the credential state
+  // once, by the pill. The tag row that used to repeat both (区域/UID/企业/签到)
+  // was removed: the region is a setting, not a per-account fact, and a uid tells
+  // the reader less than the name above it.
   return '<article class="card" data-key="' + esc(key) + '">' +
     '<div class="card-head">' +
       '<div class="avatar" style="background:' + avatarTint(key) + '">' + esc(initial) + '</div>' +
       '<div class="who"><strong title="' + esc(label) + '">' + esc(label) + '</strong>' +
-        '<span title="' + esc(account.name || '') + '">' + esc(account.name || key) + '</span></div>' +
+        (sub ? '<span title="' + esc(sub) + '">' + esc(sub) + '</span>' : '') + '</div>' +
       '<span class="pill ' + credential.cls + '"><i></i>' + esc(credential.text) + '</span>' +
     '</div>' +
-    '<div class="tags">' + tags.join('') + '</div>' +
     quotaBody(account) +
     '<div class="card-foot">' +
       '<button class="icon" type="button" title="刷新额度" aria-label="刷新额度" data-quota="' + esc(key) + '">' +
         svg('refresh') + '</button>' +
+      (view.detail ? '<span class="foot-note">' + esc(view.detail) + '</span>' : '') +
       '<span class="spacer"></span>' +
       '<button class="' + (view.done ? 'ghost' : '') + '" type="button" data-checkin="' + esc(key) + '"' +
         (view.done ? ' disabled' : '') + '>' + svg('check') + (view.done ? '已签到' : '签到') + '</button>' +
@@ -639,23 +624,37 @@ function paintStats() {
       '</span>' + label + '</div><div class="stat-num">' + value + '</div>' +
       '<div class="stat-sub">' + sub + '</div></div>';
   }
-  var cards = [
-    card('plain', 'user', '总账号', state.accounts.length, balance.replace(/^<div class="stat-sub">|<\/div>$/g, '')),
-    card('ok', 'check', '可用', usable, '凭据有效、可直接调用'),
-  ];
-  if (attention) cards.push(card('err', 'alert', '需处理', attention, '凭据过期或缺少 token'));
-  if (risk) cards.push(card('warn', 'chart', '额度告警', risk, '剩余 40% 及以下'));
-  cards.push(card('ok', 'clock', '今日已签到', claimed,
-    (state.accounts.length - claimed) + ' 个账号尚未签到'));
+  var cards = [];
+  if (state.accounts.length >= SUMMARY_MIN_ACCOUNTS) {
+    cards.push(card('plain', 'user', '总账号', state.accounts.length, balance.replace(/^<div class="stat-sub">|<\/div>$/g, '')));
+    cards.push(card('ok', 'check', '可用', usable, '凭据有效、可直接调用'));
+    if (attention) cards.push(card('err', 'alert', '需处理', attention, '凭据过期或缺少 token'));
+    if (risk) cards.push(card('warn', 'chart', '额度告警', risk, '剩余 40% 及以下'));
+    cards.push(card('ok', 'clock', '今日已签到', claimed,
+      (state.accounts.length - claimed) + ' 个账号尚未签到'));
+  }
   statsBox.innerHTML = cards.join('');
 
   // The same rule for the filters: a category with nothing in it is not a
-  // filter, it is a button that can only ever produce an empty list.
+  // filter, it is a button that can only ever produce an empty list, and a whole
+  // filter row is not worth its space until the list is long enough to search.
   var counts = { all: state.accounts.length, usable: usable, attention: attention, risk: risk, claimed: claimed };
   var labels = [
     ['all', '全部'], ['usable', '可用'], ['attention', '需处理'],
     ['risk', '额度告警'], ['claimed', '已签到']
   ];
+  var filterable = state.accounts.length >= FILTER_MIN_ACCOUNTS;
+  document.getElementById('filters').style.display = filterable ? '' : 'none';
+  if (!filterable) {
+    // Clearing the inputs matters as much as hiding them: a query left over from
+    // a larger fleet would keep filtering a list the reader can no longer see the
+    // control for.
+    chipsBox.innerHTML = '';
+    state.filter = 'all';
+    state.query = '';
+    queryInput.value = '';
+    return;
+  }
   var active = labels.filter(function (pair) {
     return pair[0] === 'all' || pair[0] === 'usable' || pair[0] === 'claimed' || counts[pair[0]] > 0;
   });
@@ -679,8 +678,12 @@ function renderList() {
       return accountCard(account);
     }).join('');
   }
-  listheadBox.innerHTML = '<div>显示 <b>' + list.length + '</b> / ' + state.accounts.length +
-    ' 个账号 · 按' + (state.sort === 'risk' ? '额度最紧张优先' : state.sort === 'name' ? '账号名称' : '未签到优先') + '排序</div>';
+  // A count of what is on screen only means something when the screen is not
+  // showing everything, so it appears with a filter or a search and not before.
+  var narrowed = state.filter !== 'all' || Boolean(state.query);
+  listheadBox.innerHTML = narrowed
+    ? '<div>显示 <b>' + list.length + '</b> / ' + state.accounts.length + ' 个账号</div>'
+    : '';
 }
 
 // render repaints everything the list depends on. Cards are rebuilt from state
@@ -880,7 +883,9 @@ sortSelect.addEventListener('change', function () {
   renderList();
 });
 
-refreshButton.onclick = function () { load().then(function () { return claimAll(true); }); };
+// Refresh reloads only. It used to also claim every account's daily bonus, which
+// made a button labelled "刷新" a mutating action; claiming has its own button.
+refreshButton.onclick = function () { load(); };
 checkinAllButton.onclick = function () { claimAll(false); };
 keyInput.addEventListener('keydown', function (event) { if (event.key === 'Enter') boot(); });
 
