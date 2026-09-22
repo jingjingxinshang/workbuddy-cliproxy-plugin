@@ -4,3 +4,7 @@ dist/
 *.dll
 *.h
 .DS_Store
+
+# Local build output from `go build -buildmode=c-shared -o workbuddy-cliproxy-plugin`
+# in the repo root: no extension, so the *.so/*.dylib rules above miss it.
+workbuddy-cliproxy-plugin
