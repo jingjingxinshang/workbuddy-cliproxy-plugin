@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.10"
+	pluginVer   = "0.3.12"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -99,9 +99,6 @@ type workbuddyAuth struct {
 	Domain       string `json:"domain,omitempty"`
 	Region       string `json:"region,omitempty"`
 	UserAgent    string `json:"user_agent,omitempty"`
-	// LastCheckinDay is the local date of the last successful daily-bonus
-	// claim, so the token-refresh hook claims at most once a day.
-	LastCheckinDay string `json:"last_checkin_day,omitempty"`
 }
 
 type loginState struct {
@@ -565,9 +562,9 @@ func refreshAuth(raw []byte) pluginapi.AuthRefreshResponse {
 		auth.RefreshToken = token.RefreshToken
 	}
 	auth.ExpiresAt = time.Now().Add(time.Duration(maxInt64(token.ExpiresIn, 3600)) * time.Second).UnixMilli()
-	// A refresh is the only moment the plugin runs without someone opening its
-	// page, so it is also when the daily bonus gets claimed. Best effort only.
-	maybeCheckin(&auth)
+	// This hook deliberately does not claim the daily bonus. It is the one place
+	// the host may be waiting on this plugin to serve a request, so it stays a
+	// token refresh and nothing else. Claiming is a manual action.
 	return pluginapi.AuthRefreshResponse{Auth: authData(auth, req.AuthID+".json"), NextRefreshAfter: time.UnixMilli(auth.ExpiresAt).Add(-5 * time.Minute)}
 }
 

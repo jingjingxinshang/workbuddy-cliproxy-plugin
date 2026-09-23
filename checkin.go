@@ -24,9 +24,6 @@ const (
 
 	// checkinPageTimeout bounds one meter call made while answering the page.
 	checkinPageTimeout = 15 * time.Second
-	// checkinRefreshTimeout bounds the same call from the token-refresh hook,
-	// where the host is waiting on the plugin.
-	checkinRefreshTimeout = 5 * time.Second
 )
 
 // checkinResult is one account's daily-bonus verdict plus the activity detail
@@ -183,26 +180,6 @@ func ensureCheckin(auth workbuddyAuth, budget time.Duration) checkinResult {
 		claim.TodayCredit = status.TodayCredit
 	}
 	return claim
-}
-
-// maybeCheckin claims the daily bonus at most once per local day.
-//
-// The host refreshes a credential shortly before its access token expires, and
-// that is the only hook this plugin has which fires without someone opening its
-// page. It is best effort: claiming is idempotent, and a credential that cannot
-// claim is still usable, so a refresh must never fail because of this.
-func maybeCheckin(auth *workbuddyAuth) {
-	if auth == nil || auth.AccessToken == "" {
-		return
-	}
-	day := time.Now().Format(time.DateOnly)
-	if auth.LastCheckinDay == day {
-		return
-	}
-	if ensureCheckin(*auth, checkinRefreshTimeout).State != checkinClaimed {
-		return
-	}
-	auth.LastCheckinDay = day
 }
 
 // accountView is one stored WorkBuddy credential as the accounts page needs it.

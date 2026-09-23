@@ -769,7 +769,7 @@ function claim(authIndex) {
     .then(function () { setRunning(authIndex, false); });
 }
 
-function claimAll(automatic) {
+function claimAll() {
   if (!state.accounts.length) return Promise.resolve();
   setRunning('all', true);
   return fetch('/v0/management/workbuddy/checkin', { method: 'POST', headers: headers() })
@@ -797,7 +797,7 @@ function claimAll(automatic) {
         }
       });
       render();
-      var head = automatic ? '自动签到：' : '签到：';
+      var head = '签到：';
       if (fresh) {
         toast(head + fresh + ' 个账号领取成功' + (gains ? '，共 ' + fmtNumber(gains) + ' credits' : ''), 'ok');
       } else if (claimed === results.length) {
@@ -846,12 +846,12 @@ function load() {
     .then(function () { setRunning('load', false); });
 }
 
-// The page claims on open because the plugin has no scheduler of its own: a
-// token refresh also claims (see refreshAuth), but that only happens when a
-// token is near expiry.
-function boot() {
+// The page does not claim on open. Nothing upstream requires the bonus to be
+// taken the moment the page loads, and a page that is labelled as a view should
+// not mutate an account just because it was opened. Claiming is the two buttons.
+func boot() {
   if (!keyInput.value.trim()) return;
-  load().then(function () { return claimAll(true); });
+  load();
 }
 
 out.addEventListener('click', function (event) {
@@ -886,7 +886,7 @@ sortSelect.addEventListener('change', function () {
 // Refresh reloads only. It used to also claim every account's daily bonus, which
 // made a button labelled "刷新" a mutating action; claiming has its own button.
 refreshButton.onclick = function () { load(); };
-checkinAllButton.onclick = function () { claimAll(false); };
+checkinAllButton.onclick = function () { claimAll(); };
 keyInput.addEventListener('keydown', function (event) { if (event.key === 'Enter') boot(); });
 
 boot();

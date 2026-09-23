@@ -3,10 +3,12 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestRegionFallback(t *testing.T) {
@@ -328,15 +330,65 @@ func TestCheckinClaimVerdict(t *testing.T) {
 	}
 }
 
-// The refresh hook must not touch a credential it cannot use, and must tolerate
-// a nil pointer: it runs inside the host's refresh worker.
-func TestMaybeCheckinSkipsUnusableCredential(t *testing.T) {
-	maybeCheckin(nil)
+// stubRegion points the CN cluster at a test server for the duration of one
+// test. Upstream calls read their base URL from the region profile, so this is
+// the seam that makes "which upstream calls did this path make" observable.
+func stubRegion(t *testing.T, url string) {
+	t.Helper()
+	old := profiles["cn"]
+	profiles["cn"] = regionProfile{baseURL: url, origin: "http://workbuddy.test", userAgent: "test-agent", loginPlatform: "CLI"}
+	t.Cleanup(func() { profiles["cn"] = old })
+}
 
-	auth := workbuddyAuth{}
-	maybeCheckin(&auth)
-	if auth.LastCheckinDay != "" {
-		t.Fatalf("last check-in day = %q, want empty", auth.LastCheckinDay)
+// auth.refresh fires without anyone opening a page and can run while the host is
+// waiting on this plugin to serve a request, so it must stay a token refresh. It
+// used to also claim the daily bonus, which let a plugin action race an
+// operator's own check-in on the one path that should be pure token maintenance.
+func TestRefreshAuthDoesNotClaimTheBonus(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		// tokenResponse is camelCase on the wire, unlike the credential itself.
+		_, _ = w.Write([]byte(`{"code":0,"data":{"accessToken":"new","refreshToken":"r2","expiresIn":3600}}`))
+	}))
+	defer srv.Close()
+	stubRegion(t, srv.URL)
+
+	raw, errMarshal := json.Marshal(pluginapi.AuthRefreshRequest{
+		AuthID:       "auth-1",
+		AuthProvider: providerID,
+		StorageJSON:  []byte(`{"access_token":"old","refresh_token":"r1","region":"cn"}`),
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal refresh request: %v", errMarshal)
+	}
+
+	resp := refreshAuth(raw)
+
+	if len(paths) != 1 || paths[0] != "/v2/plugin/auth/token/refresh" {
+		t.Fatalf("upstream calls = %v, want exactly the token refresh and no meter call", paths)
+	}
+	if resp.Auth.ID != "auth-1" || resp.Auth.Provider != providerID {
+		t.Fatalf("refresh did not succeed, so this test proved nothing: %+v", resp.Auth)
+	}
+}
+
+// A page labelled as a view must not mutate an account just because it was
+// opened. It used to claim every account on load.
+func TestAccountsPageDoesNotClaimOnOpen(t *testing.T) {
+	page := accountsPageHTML()
+	if strings.Contains(page, "claimAll(true)") {
+		t.Fatal("the accounts page still claims on open; opening a view must not mutate accounts")
+	}
+	if strings.Contains(page, "claimAll(false)") {
+		t.Fatal("claimAll should take no arguments once only the button calls it")
+	}
+	if !strings.Contains(page, "function claimAll()") {
+		t.Fatal("claimAll signature changed; only the button is supposed to call it")
+	}
+	if !strings.Contains(page, "checkinAllButton.onclick = function () { claimAll(); }") {
+		t.Fatal("the manual check-in button is no longer wired up")
 	}
 }
 

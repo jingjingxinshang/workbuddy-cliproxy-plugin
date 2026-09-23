@@ -13,7 +13,7 @@
 - WorkBuddy 所需的 Origin、Referer、User-Agent、账号身份请求头
 - QuotaProvider：`/billing/meter/get-user-resource` 额度查询
 - 面板内账号页：多账号列表（昵称 / UID / 企业 / 区域 / 套餐 / 额度 / 凭据到期 / 签到状态）
-- 每日签到：`/billing/meter/checkin-status` + `/billing/meter/daily-checkin`，页面打开与 token 刷新时自动领取，也可手动
+- 每日签到：`/billing/meter/checkin-status` + `/billing/meter/daily-checkin`，**仅手动触发**（账号页按钮或管理接口），插件不会自动领取
 - CPA Plugin Store Registry 发布结构
 
 ## 本地构建
@@ -158,10 +158,12 @@ POST /billing/meter/checkin-status   读状态（只读，不领取）
 POST /billing/meter/daily-checkin    领取每日奖励
 ```
 
-触发方式有两种，都是幂等的：
+**只在手动触发时领取**，两种方式都是幂等的：
 
-- **打开账号页时自动领取**，并在有账号未签到时给出提示；也可点「全部签到」或单个账号的「签到」。
-- **token 刷新时自动领取**（每个本地自然日最多一次）。这是插件唯一一个不需要有人打开页面就会执行的钩子；不刷新 token 就不会触发。
+- 账号页的「全部签到」或单个账号的「签到」按钮。
+- 管理接口 `POST /v0/management/workbuddy/checkin`。
+
+插件**不会**在打开页面、token 刷新或任何其他时机自行领取。“打开页面”被当成“查看”，不会改动你的账号状态。如果你有自己的签到途径，这个功能完全可以不用 —— 它不会主动运行。
 
 ### 为什么「签到状态」经常是未知
 
