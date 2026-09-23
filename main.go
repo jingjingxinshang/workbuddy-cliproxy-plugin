@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.10"
+	pluginVer   = "0.3.11"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -117,6 +117,10 @@ type loginState struct {
 // there is no separate place an operator has to configure WorkBuddy login.
 type pluginConfig struct {
 	DefaultRegion string `yaml:"default_region"`
+	// CheckinOnRefresh is a pointer so an absent key stays distinguishable from
+	// an explicit false. Absent means enabled, which is what the hook did before
+	// the switch existed, so an existing config.yaml keeps its behaviour.
+	CheckinOnRefresh *bool `yaml:"checkin_on_refresh"`
 }
 
 // lifecycleRequest is the plugin.register / plugin.reconfigure payload. The
@@ -354,7 +358,7 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 }
 
 func registrationData() registration {
-	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: pluginapi.Metadata{Name: pluginName, Version: pluginVer, Author: "WorkBuddy CPA Plugin", GitHubRepository: "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin", ConfigFields: []pluginapi.ConfigField{{Name: "default_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "WorkBuddy cluster new logins default to. The panel's OAuth card starts a login without parameters, so this decides between the CN and INTL clusters."}}}, Capabilities: registrationCapability{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"chat-completions"}, ExecutorOutputFormats: []string{"chat-completions"}, CommandLinePlugin: true, ManagementAPI: true, QuotaProvider: true}}
+	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: pluginapi.Metadata{Name: pluginName, Version: pluginVer, Author: "WorkBuddy CPA Plugin", GitHubRepository: "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin", ConfigFields: []pluginapi.ConfigField{{Name: "default_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "WorkBuddy cluster new logins default to. The panel's OAuth card starts a login without parameters, so this decides between the CN and INTL clusters."}, {Name: "checkin_on_refresh", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Claim the daily bonus from the token-refresh hook. Enabled when unset. That hook runs while the host may be waiting on this plugin for a request, so an operator who would rather keep the call off that path can turn it off."}}}, Capabilities: registrationCapability{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"chat-completions"}, ExecutorOutputFormats: []string{"chat-completions"}, CommandLinePlugin: true, ManagementAPI: true, QuotaProvider: true}}
 }
 
 // configure reads the configuration the host delivers on register and
@@ -362,9 +366,9 @@ func registrationData() registration {
 //
 // Nothing about WorkBuddy login is configured in the plugin's own UI: the panel
 // starts the flow through the host's generic plugin OAuth route, and the host
-// passes this plugin's plugins.configs.workbuddy section here as YAML. Only the
-// default region is read from it, because the panel's OAuth card sends no
-// parameters and therefore cannot pick a cluster.
+// passes this plugin's plugins.configs.workbuddy section here as YAML: the
+// default region (the panel's OAuth card sends no parameters, so it cannot pick
+// a cluster) and whether the token-refresh hook may claim the daily bonus.
 func configure(raw []byte) error {
 	cfg := pluginConfig{DefaultRegion: defaultRegion}
 	if len(raw) > 0 {
@@ -401,6 +405,20 @@ func configuredRegion() string {
 	region := pluginCfg.DefaultRegion
 	configMu.RUnlock()
 	return normalizeRegion(region)
+}
+
+// checkinOnRefreshEnabled reports whether the token-refresh hook may claim the
+// daily bonus.
+//
+// The hook runs while the host may be waiting on this plugin for a request, so
+// it is the one place an operator can reasonably want to keep the bonus claim
+// out of. Unset means enabled: that is how the hook behaved before the switch
+// existed, so an existing config is not silently changed.
+func checkinOnRefreshEnabled() bool {
+	configMu.RLock()
+	enabled := pluginCfg.CheckinOnRefresh
+	configMu.RUnlock()
+	return enabled == nil || *enabled
 }
 
 // loginRegion resolves the cluster for one login. An explicit region wins over

@@ -24,9 +24,11 @@ const (
 
 	// checkinPageTimeout bounds one meter call made while answering the page.
 	checkinPageTimeout = 15 * time.Second
-	// checkinRefreshTimeout bounds the same call from the token-refresh hook,
-	// where the host is waiting on the plugin.
-	checkinRefreshTimeout = 5 * time.Second
+	// checkinRefreshTimeout bounds the claim made from the token-refresh hook,
+	// where the host may be waiting on the plugin to serve a request. The claim
+	// is idempotent and best effort, so a budget that is too short costs a
+	// retry on the next refresh and nothing else.
+	checkinRefreshTimeout = 3 * time.Second
 )
 
 // checkinResult is one account's daily-bonus verdict plus the activity detail
@@ -191,15 +193,25 @@ func ensureCheckin(auth workbuddyAuth, budget time.Duration) checkinResult {
 // that is the only hook this plugin has which fires without someone opening its
 // page. It is best effort: claiming is idempotent, and a credential that cannot
 // claim is still usable, so a refresh must never fail because of this.
+//
+// It claims directly rather than probing first. The status read cannot settle
+// the question -- there is no read-only source for the daily bonus -- so it only
+// ever put a second round trip in front of the claim, and this hook runs while
+// the host may be waiting on the plugin to serve a request. A repeat claim
+// answers checkinAlreadyClaimedCode, which the claim verdict already reports as
+// claimed, so the outcome is unchanged for one call instead of up to two.
 func maybeCheckin(auth *workbuddyAuth) {
 	if auth == nil || auth.AccessToken == "" {
+		return
+	}
+	if !checkinOnRefreshEnabled() {
 		return
 	}
 	day := time.Now().Format(time.DateOnly)
 	if auth.LastCheckinDay == day {
 		return
 	}
-	if ensureCheckin(*auth, checkinRefreshTimeout).State != checkinClaimed {
+	if claimCheckin(*auth, checkinRefreshTimeout).State != checkinClaimed {
 		return
 	}
 	auth.LastCheckinDay = day
