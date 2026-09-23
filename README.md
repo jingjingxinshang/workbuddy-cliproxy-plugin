@@ -115,8 +115,7 @@ plugins:
   configs:
     workbuddy:
       enabled: true
-      default_region: intl      # cn | intl
-      checkin_on_refresh: true  # 默认 true；设为 false 则刷新钩子不再签到
+      default_region: intl   # cn | intl
 ```
 
 插件在 `plugin.register` / `plugin.reconfigure` 时从宿主下发的 `config_yaml` 中读取该字段，取值 `cn`（中国大陆）或 `intl`（国际）。
@@ -127,23 +126,6 @@ plugins:
 curl -H "Authorization: Bearer <MANAGEMENT_KEY>" \
   "http://127.0.0.1:8317/v0/management/workbuddy-auth-url?region=intl"
 ```
-
-### 刷新时签到（`checkin_on_refresh`）
-
-插件没有自己的定时器，所以每日签到的触发点是**宿主刷新 token 的那一刻**（`auth.refresh`）——那是插件唯一会在没人打开页面的情况下被调用的时机。该调用是**一次性**的：直接请求领取接口，不会先探测状态（状态接口无法证明「今天已领」，只会多一次上游往返）。
-
-这个钩子的特殊之处在于：宿主刷新 token 时**可能正有请求在等它**。所以如果你希望请求路径上完全不带这次签到调用，把它关掉即可：
-
-```yaml
-plugins:
-  configs:
-    workbuddy:
-      checkin_on_refresh: false
-```
-
-- 不写这个字段 = 启用（等同旧行为，升级不会无声改变你的配置）。
-- 关掉之后仍然可以在账号页点「签到」手动领取，或调 `POST /v0/management/workbuddy/checkin`。
-- 签到是幂等的：重复领取会返回 `code=10001`，插件视为「已领取」而非失败。
 
 ## 账号页
 
