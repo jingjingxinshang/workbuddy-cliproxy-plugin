@@ -66,7 +66,7 @@ func TestBillingAttemptPolicy(t *testing.T) {
 	if billingAttempts != 3 {
 		t.Fatalf("billingAttempts = %d, want 3", billingAttempts)
 	}
-	if billingTimeout <= 0 || billingTimeout > 2*time.Minute {
-		t.Fatalf("billingTimeout = %s, want a bounded per-attempt budget", billingTimeout)
+	if billingAttemptTimeout <= 0 || billingAttemptTimeout > 2*time.Minute {
+		t.Fatalf("billingAttemptTimeout = %s, want a bounded per-attempt budget", billingAttemptTimeout)
 	}
 }

@@ -74,12 +74,21 @@ const (
 
 	// billingConcurrency is how many billing reads may overlap process-wide.
 	billingConcurrency = 4
-	// billingTimeout bounds one billing attempt, so a hung read cannot hold a
-	// concurrency slot indefinitely.
-	billingTimeout = 20 * time.Second
-	// billingAttempts and billingBackoff describe the retry of a billing read.
-	// Only transport failures and 5xx are retried: a 4xx or a business error is
-	// an answer, and repeating it just spends the limiter.
+	// billingSlotWait bounds how long a read waits for a slot. Waiting without a
+	// bound is how a limiter turns into a hang: four stuck reads would leave every
+	// later request queued until its caller gave up, which reads as a timeout with
+	// no cause. A saturated limiter fails fast instead, and says so.
+	billingSlotWait = 2 * time.Second
+	// billingBudget bounds one whole billing read, retries included. Budgeting the
+	// read rather than each attempt is what keeps a failing upstream from
+	// multiplying its latency by the attempt count.
+	billingBudget = 15 * time.Second
+	// billingAttemptTimeout bounds a single attempt, so a hung connection cannot
+	// consume the whole budget and leave nothing for a retry.
+	billingAttemptTimeout = 8 * time.Second
+	// billingAttempts is how many times a read is tried inside the budget. Only
+	// 5xx and transport failures are retried: a 4xx is a decision about this
+	// request, and a 200 carrying a business error is an answer.
 	billingAttempts = 3
 
 	// defaultRegion is the cluster used when neither the request metadata nor
@@ -1153,9 +1162,15 @@ func capacityValue(value *float64) float64 {
 // between attempts would let a retry storm do exactly what the limit exists to
 // prevent.
 func billingRead(profile regionProfile, auth workbuddyAuth, payload []byte) (int, []byte, error) {
-	billingSlots <- struct{}{}
-	defer func() { <-billingSlots }()
+	// A saturated limiter is reported, not queued behind.
+	select {
+	case billingSlots <- struct{}{}:
+		defer func() { <-billingSlots }()
+	case <-time.After(billingSlotWait):
+		return 0, nil, errors.New("billing reads are saturated; try again")
+	}
 
+	deadline := time.Now().Add(billingBudget)
 	var (
 		status  int
 		body    []byte
@@ -1163,9 +1178,23 @@ func billingRead(profile regionProfile, auth workbuddyAuth, payload []byte) (int
 	)
 	for attempt := 0; attempt < billingAttempts; attempt++ {
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt*300) * time.Millisecond)
+			// The pause is part of the budget too, so a retry cannot push the read
+			// past it.
+			pause := time.Duration(attempt*300) * time.Millisecond
+			if time.Now().Add(pause).After(deadline) {
+				break
+			}
+			time.Sleep(pause)
 		}
-		status, body, errCall = upstreamWithin(billingTimeout, "POST", profile.baseURL+"/billing/meter/get-user-resource", profile.origin, billingUserAgent, billingHeaders(auth), payload, false)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		budget := billingAttemptTimeout
+		if remaining < budget {
+			budget = remaining
+		}
+		status, body, errCall = upstreamWithin(budget, "POST", profile.baseURL+"/billing/meter/get-user-resource", profile.origin, billingUserAgent, billingHeaders(auth), payload, false)
 		if errCall == nil && !isTransientBillingStatus(status) {
 			return status, body, nil
 		}
