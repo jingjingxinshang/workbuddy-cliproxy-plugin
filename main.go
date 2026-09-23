@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.8"
+	pluginVer   = "0.3.9"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -454,34 +454,59 @@ func parseAuth(raw []byte) pluginapi.AuthParseResponse {
 // `/auth-files/download` reads <auth-dir>/<name> verbatim. Returning the
 // WorkBuddy uid here made the panel display (and try to download) a file that
 // never existed, because the credential on disk is named after FileName.
-// sessionDeadMarkers are the answers that mean the credential can never work
-// again without a fresh login, as opposed to a request that merely failed.
+// sessionDeadPhrases are the answers whose text names a session that is gone for
+// good, as opposed to a request that merely failed.
 //
 // The gateway kills the underlying offline session, after which the stored refresh
-// token is rejected outright. Retrying is pointless and the failure is silent: every
-// later call returns an HTML error page, which surfaces here as a parse failure and
-// reads like a plugin bug rather than a dead credential.
-var sessionDeadMarkers = []string{
+// token is rejected outright. Retrying is pointless and the failure is otherwise
+// silent: every later call returns an HTML error page, which surfaces here as a
+// parse failure and reads like a plugin bug rather than a credential that needs a
+// fresh login.
+//
+// These are long and specific enough to match as text.
+var sessionDeadPhrases = []string{
 	"Offline user session not found",
 	"SESSION_EXPIRED",
-	"12153",
 }
+
+// sessionDeadCode is the numeric form of the same answer, and it is compared as a
+// FIELD VALUE, never as a substring.
+//
+// Matching "12153" anywhere in the body disabled a working credential the first
+// time this shipped: a timestamp, a request id or a larger number containing those
+// digits was enough, and every call for that account then failed. A five digit run
+// is not a code.
+const sessionDeadCode = 12153
 
 // refreshFailureIsTerminal reports whether a refresh failure means the credential
 // is finished. A transport error, a 5xx or a 429 is transient and must stay
-// retryable; only an authentication answer naming one of the dead-session markers
-// is terminal.
+// retryable; only an authentication answer naming a dead session is terminal.
+//
+// The asymmetry is deliberate: refusing to disable a dead credential costs one
+// wasted request, while disabling a live one is invisible to the operator and takes
+// the account down.
 func refreshFailureIsTerminal(status int, body []byte) bool {
 	if status != http.StatusUnauthorized && status != http.StatusForbidden {
 		return false
 	}
 	text := string(body)
-	for _, marker := range sessionDeadMarkers {
-		if strings.Contains(text, marker) {
+	for _, phrase := range sessionDeadPhrases {
+		if strings.Contains(text, phrase) {
 			return true
 		}
 	}
-	return false
+	// The code arrives inside an envelope, and its field name varies by endpoint.
+	var envelope struct {
+		Code      *int `json:"code"`
+		ErrorCode *int `json:"errorCode"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return false
+	}
+	if envelope.Code != nil && *envelope.Code == sessionDeadCode {
+		return true
+	}
+	return envelope.ErrorCode != nil && *envelope.ErrorCode == sessionDeadCode
 }
 
 func authData(auth workbuddyAuth, fileName string) pluginapi.AuthData {
