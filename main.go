@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.9"
+	pluginVer   = "0.3.10"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -71,25 +71,6 @@ const (
 	// and reported it as a bare context deadline rather than anything that named
 	// the real cause.
 	chatTimeout = 10 * time.Minute
-
-	// billingConcurrency is how many billing reads may overlap process-wide.
-	billingConcurrency = 4
-	// billingSlotWait bounds how long a read waits for a slot. Waiting without a
-	// bound is how a limiter turns into a hang: four stuck reads would leave every
-	// later request queued until its caller gave up, which reads as a timeout with
-	// no cause. A saturated limiter fails fast instead, and says so.
-	billingSlotWait = 2 * time.Second
-	// billingBudget bounds one whole billing read, retries included. Budgeting the
-	// read rather than each attempt is what keeps a failing upstream from
-	// multiplying its latency by the attempt count.
-	billingBudget = 15 * time.Second
-	// billingAttemptTimeout bounds a single attempt, so a hung connection cannot
-	// consume the whole budget and leave nothing for a retry.
-	billingAttemptTimeout = 8 * time.Second
-	// billingAttempts is how many times a read is tried inside the budget. Only
-	// 5xx and transport failures are retried: a 4xx is a decision about this
-	// request, and a 200 carrying a business error is an answer.
-	billingAttempts = 3
 
 	// defaultRegion is the cluster used when neither the request metadata nor
 	// the plugin configuration names a usable one.
@@ -241,13 +222,6 @@ var (
 	hostAPI *C.cliproxy_host_api
 	loginMu sync.Mutex
 	logins  = map[string]loginState{}
-
-	// billingSlots bounds how many billing reads are in flight at once. The
-	// endpoint answers 500 under concurrent load -- the reference plugin carries
-	// the same limiter for the same reason -- and the panel can ask for several
-	// accounts at once, so without this a routine page load can look like an
-	// upstream outage.
-	billingSlots = make(chan struct{}, billingConcurrency)
 
 	configMu  sync.RWMutex
 	pluginCfg = pluginConfig{DefaultRegion: defaultRegion}
@@ -456,68 +430,6 @@ func parseAuth(raw []byte) pluginapi.AuthParseResponse {
 	return pluginapi.AuthParseResponse{Handled: true, Auth: authData(auth, authFileSource(req))}
 }
 
-// authData builds the credential record CPA stores.
-//
-// ID deliberately mirrors the file name. CPA names plugin-backed runtime
-// credentials by ID, and its management endpoints address them by that name —
-// `/auth-files/download` reads <auth-dir>/<name> verbatim. Returning the
-// WorkBuddy uid here made the panel display (and try to download) a file that
-// never existed, because the credential on disk is named after FileName.
-// sessionDeadPhrases are the answers whose text names a session that is gone for
-// good, as opposed to a request that merely failed.
-//
-// The gateway kills the underlying offline session, after which the stored refresh
-// token is rejected outright. Retrying is pointless and the failure is otherwise
-// silent: every later call returns an HTML error page, which surfaces here as a
-// parse failure and reads like a plugin bug rather than a credential that needs a
-// fresh login.
-//
-// These are long and specific enough to match as text.
-var sessionDeadPhrases = []string{
-	"Offline user session not found",
-	"SESSION_EXPIRED",
-}
-
-// sessionDeadCode is the numeric form of the same answer, and it is compared as a
-// FIELD VALUE, never as a substring.
-//
-// Matching "12153" anywhere in the body disabled a working credential the first
-// time this shipped: a timestamp, a request id or a larger number containing those
-// digits was enough, and every call for that account then failed. A five digit run
-// is not a code.
-const sessionDeadCode = 12153
-
-// refreshFailureIsTerminal reports whether a refresh failure means the credential
-// is finished. A transport error, a 5xx or a 429 is transient and must stay
-// retryable; only an authentication answer naming a dead session is terminal.
-//
-// The asymmetry is deliberate: refusing to disable a dead credential costs one
-// wasted request, while disabling a live one is invisible to the operator and takes
-// the account down.
-func refreshFailureIsTerminal(status int, body []byte) bool {
-	if status != http.StatusUnauthorized && status != http.StatusForbidden {
-		return false
-	}
-	text := string(body)
-	for _, phrase := range sessionDeadPhrases {
-		if strings.Contains(text, phrase) {
-			return true
-		}
-	}
-	// The code arrives inside an envelope, and its field name varies by endpoint.
-	var envelope struct {
-		Code      *int `json:"code"`
-		ErrorCode *int `json:"errorCode"`
-	}
-	if json.Unmarshal(body, &envelope) != nil {
-		return false
-	}
-	if envelope.Code != nil && *envelope.Code == sessionDeadCode {
-		return true
-	}
-	return envelope.ErrorCode != nil && *envelope.ErrorCode == sessionDeadCode
-}
-
 func authData(auth workbuddyAuth, fileName string) pluginapi.AuthData {
 	if fileName == "" {
 		fileName = providerID + ".json"
@@ -632,20 +544,8 @@ func refreshAuth(raw []byte) pluginapi.AuthRefreshResponse {
 	}
 	profile := profiles[regionOf(auth)]
 	status, body, err := upstream("POST", profile.baseURL+"/v2/plugin/auth/token/refresh", profile.origin, profile.userAgent, map[string]string{"X-Refresh-Token": auth.RefreshToken}, []byte("{}"), false)
-	if err != nil {
-		// Transient: an empty response leaves the credential as it is, and the
-		// host will ask again.
+	if err != nil || status >= 400 {
 		return pluginapi.AuthRefreshResponse{}
-	}
-	if refreshFailureIsTerminal(status, body) {
-		// The session is gone. Saying so once is better than failing every request
-		// that follows with an error nobody can attribute.
-		disabled := authData(auth, req.AuthID+".json")
-		disabled.Disabled = true
-		disabled.Metadata["status"] = "session_dead"
-		disabled.Metadata["status_detail"] = "上游离线会话已失效，需要重新登录"
-		warn("workbuddy credential %s: refresh session is dead (status=%d); disabling until a new login", req.AuthID, status)
-		return pluginapi.AuthRefreshResponse{Auth: disabled}
 	}
 	if status >= 400 {
 		return pluginapi.AuthRefreshResponse{}
@@ -726,9 +626,9 @@ func discoverModels(raw []byte) pluginapi.ModelResponse {
 }
 
 func execute(raw []byte, stream bool) ([]byte, error) {
-	// The wire type, not pluginapi.ExecutorRequest: it carries the stream id this
-	// call must emit into.
-	var req executorWire
+	// The documented request is enough now: nothing on this path emits into a host
+	// stream, so the extra host-side fields are not read.
+	var req pluginapi.ExecutorRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, err
 	}
@@ -738,12 +638,6 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	}
 	profile := profiles[regionOf(auth)]
 	headers := chatHeaders(auth, profile)
-	// When the host opened a stream for this call, answer by emitting as the
-	// upstream produces. Buffering instead is what let long generations idle out:
-	// nothing was written to the client until the model finished.
-	if stream && req.StreamID != "" {
-		return executeStreaming(req.StreamID, profile.baseURL+"/v2/chat/completions", profile.origin, authUserAgent(auth, profile), headers, req.Payload)
-	}
 	status, body, err := upstreamWithin(chatTimeout, "POST", profile.baseURL+"/v2/chat/completions", profile.origin, authUserAgent(auth, profile), headers, req.Payload, stream)
 	if err != nil {
 		return errorEnvelope("upstream_error", err.Error(), http.StatusBadGateway), nil
@@ -1067,7 +961,7 @@ func fetchQuota(raw []byte) (pluginapi.QuotaFetchResponse, error) {
 	if errMarshal != nil {
 		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("encode billing request: %w", errMarshal)
 	}
-	status, body, errCall := billingRead(profile, auth, payload)
+	status, body, errCall := upstream("POST", profile.baseURL+"/billing/meter/get-user-resource", profile.origin, billingUserAgent, billingHeaders(auth), payload, false)
 	if errCall != nil {
 		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("billing request failed: %w", errCall)
 	}
@@ -1152,62 +1046,6 @@ func capacityValue(value *float64) float64 {
 		return 0
 	}
 	return *value
-}
-
-// billingRead performs one billing read through the concurrency limiter, with a
-// bounded retry for the failures that are worth repeating.
-//
-// The limiter is held across the retries, not acquired per attempt: the point is
-// to cap how many billing requests reach the gateway at once, and releasing
-// between attempts would let a retry storm do exactly what the limit exists to
-// prevent.
-func billingRead(profile regionProfile, auth workbuddyAuth, payload []byte) (int, []byte, error) {
-	// A saturated limiter is reported, not queued behind.
-	select {
-	case billingSlots <- struct{}{}:
-		defer func() { <-billingSlots }()
-	case <-time.After(billingSlotWait):
-		return 0, nil, errors.New("billing reads are saturated; try again")
-	}
-
-	deadline := time.Now().Add(billingBudget)
-	var (
-		status  int
-		body    []byte
-		errCall error
-	)
-	for attempt := 0; attempt < billingAttempts; attempt++ {
-		if attempt > 0 {
-			// The pause is part of the budget too, so a retry cannot push the read
-			// past it.
-			pause := time.Duration(attempt*300) * time.Millisecond
-			if time.Now().Add(pause).After(deadline) {
-				break
-			}
-			time.Sleep(pause)
-		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			break
-		}
-		budget := billingAttemptTimeout
-		if remaining < budget {
-			budget = remaining
-		}
-		status, body, errCall = upstreamWithin(budget, "POST", profile.baseURL+"/billing/meter/get-user-resource", profile.origin, billingUserAgent, billingHeaders(auth), payload, false)
-		if errCall == nil && !isTransientBillingStatus(status) {
-			return status, body, nil
-		}
-		warn("billing read attempt %d/%d failed: status=%d err=%v", attempt+1, billingAttempts, status, errCall)
-	}
-	return status, body, errCall
-}
-
-// isTransientBillingStatus reports whether a status is worth repeating. Only 5xx
-// qualifies: 4xx is a decision about this request, and a business error inside a
-// 200 is an answer that parsing will surface.
-func isTransientBillingStatus(status int) bool {
-	return status >= 500
 }
 
 func billingHeaders(auth workbuddyAuth) map[string]string {

@@ -1,92 +1,21 @@
 package main
 
+// stream.go owns the answer path: how an upstream event stream is turned into
+// chunks for the client, and nothing else.
+//
+// It used to also emit chunks to the host as they arrived. That is removed: it put
+// a host callback on the request path for every streaming call, with no timeout on
+// the call itself, so a host that did not answer promptly left the request waiting
+// until the caller gave up -- which is what every request failing looked like. The
+// host now receives the finished chunks in the response, which is the path that
+// worked before.
+
 import (
-	"bufio"
 	"bytes"
-	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
-	"sync/atomic"
-	"time"
-
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
-
-const (
-	// firstByteTimeout bounds how long the gateway may take to produce the FIRST
-	// byte of a stream. A gateway that has not started talking by then is not
-	// going to, and reporting that is better than holding the request open.
-	firstByteTimeout = 60 * time.Second
-	// streamCeiling is a safety net, not an idle timeout: it bounds a stream that
-	// never ends at all, and is deliberately far longer than any generation.
-	// Nothing fires between bytes, because an idle timeout is what kills a long
-	// answer mid-thought.
-	streamCeiling = 30 * time.Minute
-)
-
-// executorWire is what the host actually sends to the executor methods.
-//
-// The embedded struct is the documented request; StreamID is the host's handle
-// for this call's stream, and it is the only way a chunk pushed with
-// host.stream.emit reaches the client. It used to be discarded here, which left
-// the batch response as the only way to answer -- and a batch response cannot be
-// sent until the upstream finishes, so a long generation delivered nothing for as
-// long as the model took. Whatever idle timeout sits in front of CPA then closed
-// the connection, and CPA maps the resulting context.Canceled to 499.
-type executorWire struct {
-	pluginapi.ExecutorRequest
-	StreamID       string `json:"stream_id,omitempty"`
-	HostCallbackID string `json:"host_callback_id,omitempty"`
-}
-
-// streamEmitRequest and streamCloseRequest mirror the host's rpcStreamEmitRequest
-// and rpcStreamCloseRequest: a stream is addressed by id and nothing else.
-type streamEmitRequest struct {
-	StreamID string `json:"stream_id"`
-	Payload  []byte `json:"payload,omitempty"`
-	Error    string `json:"error,omitempty"`
-}
-
-type streamCloseRequest struct {
-	StreamID string `json:"stream_id"`
-	Error    string `json:"error,omitempty"`
-}
-
-func hostStreamEmit(streamID string, payload []byte) error {
-	if streamID == "" || len(payload) == 0 {
-		return nil
-	}
-	_, err := hostCall("host.stream.emit", streamEmitRequest{StreamID: streamID, Payload: payload})
-	return err
-}
-
-// hostStreamEmitError pushes a chunk that carries an error rather than a payload.
-// The host turns the message into the stream chunk's error, which is how a
-// truncated or empty upstream is surfaced instead of ending the answer silently.
-func hostStreamEmitError(streamID, message string) {
-	if streamID == "" || message == "" {
-		return
-	}
-	if _, err := hostCall("host.stream.emit", streamEmitRequest{StreamID: streamID, Error: message}); err != nil {
-		warn("stream emit (error frame) failed: %v", err)
-	}
-}
-
-// hostStreamClose ends the stream. An empty message means it finished; anything
-// else is reported to the client as the stream's error.
-func hostStreamClose(streamID, message string) {
-	if streamID == "" {
-		return
-	}
-	if _, err := hostCall("host.stream.close", streamCloseRequest{StreamID: streamID, Error: message}); err != nil {
-		warn("stream close failed: %v", err)
-	}
-}
 
 // sseAccumulator turns a byte stream into complete SSE events.
 //
@@ -258,146 +187,6 @@ func (a *sseAccumulator) emit() []byte {
 	return out.Bytes()
 }
 
-// executeStreaming proxies the upstream event stream to the client as it arrives.
-//
-// This is what keeps a long generation alive. Each upstream event is handed to
-// the host the moment it is complete, so bytes keep moving and no idle timeout in
-// front of CPA has anything to time out on. It also gives the plugin the only
-// cancellation signal it can get: when the reader is gone the host refuses the
-// emit, and that refusal cancels the upstream request instead of finishing a
-// response nobody will read.
-func executeStreaming(streamID, target, origin, userAgent string, extra map[string]string, body []byte) ([]byte, error) {
-	if streamID == "" {
-		return nil, errors.New("no stream id for a streaming call")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Only the first byte is timed. After that the stream runs until it ends, the
-	// ceiling is reached, or the reader disappears -- an idle deadline in between
-	// would cut off a long answer while it is still being written.
-	var firstByteSeen atomic.Bool
-	firstByteTimer := time.AfterFunc(firstByteTimeout, func() {
-		if !firstByteSeen.Load() {
-			warn("chat stream produced no first byte within %s (%s)", firstByteTimeout, target)
-			cancel()
-		}
-	})
-	defer firstByteTimer.Stop()
-	ceilingTimer := time.AfterFunc(streamCeiling, func() {
-		warn("chat stream reached the %s ceiling (%s)", streamCeiling, target)
-		cancel()
-	})
-	defer ceilingTimer.Stop()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
-	if err != nil {
-		hostStreamClose(streamID, err.Error())
-		return errorEnvelope("upstream_error", err.Error(), http.StatusBadGateway), nil
-	}
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", userAgent)
-	for key, value := range extra {
-		req.Header.Set(key, value)
-	}
-
-	// No client timeout on the http.Client: the stream is bounded by the context
-	// above, so a long generation is not cut off by a transport default.
-	resp, err := (&http.Client{}).Do(req)
-	if err != nil {
-		warn("chat stream failed: %v (%s)", err, target)
-		hostStreamClose(streamID, err.Error())
-		return errorEnvelope("upstream_error", err.Error(), http.StatusBadGateway), nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode >= 400 {
-		payload, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		warn("chat stream rejected: status=%d url=%s body=%s", resp.StatusCode, target, truncate(string(payload), 600))
-		hostStreamClose(streamID, string(payload))
-		return errorEnvelope("upstream_error", string(payload), resp.StatusCode), nil
-	}
-
-	acc := &sseAccumulator{}
-	reader := bufio.NewReaderSize(resp.Body, 64<<10)
-	emitted := 0
-	var readErr error
-	emit := func(event []byte) bool {
-		if errEmit := hostStreamEmit(streamID, event); errEmit != nil {
-			warn("stream emit refused after %d events (client gone?): %v", emitted, errEmit)
-			cancel()
-			return false
-		}
-		emitted++
-		return true
-	}
-
-	for {
-		line, errRead := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			if !firstByteSeen.Swap(true) {
-				firstByteTimer.Stop()
-			}
-			for _, event := range acc.push(line) {
-				if !emit(event) {
-					return okEnvelope(streamResponse{Headers: sseHeaderSet()})
-				}
-				if acc.done {
-					hostStreamClose(streamID, "")
-					return okEnvelope(streamResponse{Headers: sseHeaderSet()})
-				}
-			}
-		}
-		if errRead != nil {
-			if !errors.Is(errRead, io.EOF) && ctx.Err() == nil {
-				warn("chat stream read stopped after %d events: %v", emitted, errRead)
-				readErr = errRead
-			}
-			break
-		}
-	}
-	for _, event := range acc.flush() {
-		if !emit(event) {
-			break
-		}
-	}
-
-	// A stream that produced nothing at all is not an answer, and ending quietly
-	// made it look like one: the client saw an empty completion with no reason.
-	if emitted == 0 && ctx.Err() == nil {
-		hostStreamEmitError(streamID, "upstream stream ended without a single event")
-	}
-	// A read that stopped for any reason other than an ending stream is a
-	// truncated answer, and the reader has to be told which.
-	if readErr != nil && !errors.Is(readErr, io.EOF) && ctx.Err() == nil {
-		hostStreamEmitError(streamID, "upstream stream read error: "+readErr.Error())
-	}
-	// A cancelled context is a reader that went away or a timeout we already
-	// logged; either way the client is told, and the upstream request is already
-	// torn down with it.
-	if errCtx := ctx.Err(); errCtx != nil {
-		hostStreamClose(streamID, errCtx.Error())
-		return okEnvelope(streamResponse{Headers: sseHeaderSet()})
-	}
-	hostStreamClose(streamID, "")
-	return okEnvelope(streamResponse{Headers: sseHeaderSet()})
-}
-
-// sseHeaderSet is the response header for a streamed answer.
-func sseHeaderSet() http.Header {
-	return http.Header{"Content-Type": []string{"text/event-stream"}, "Cache-Control": []string{"no-cache"}}
-}
-
-// warn reports a failure the client cannot see. Streaming has no error channel of
-// its own, so the process log is the only place a refused emit or a dead upstream
-// can be read from.
 func warn(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[workbuddy] "+format+"\n", args...)
 }
-
-// unusedJSON keeps the encoding/json import honest: the wire types are described
-// by their json tags, and the envelope helpers live in main.go.
-var _ = json.Marshal

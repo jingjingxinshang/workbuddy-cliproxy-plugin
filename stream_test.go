@@ -1,51 +1,10 @@
 package main
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 )
-
-// The stream id is the only way a chunk reaches the client, and it arrives as a
-// top-level field beside the documented request. Reading it is what makes real
-// streaming possible at all, so it is asserted rather than assumed.
-func TestExecutorWireCarriesStreamID(t *testing.T) {
-	wire := executorWire{}
-	// Payload is a []byte field, so the host sends it base64-encoded inside the
-	// JSON envelope; that is also why the executor decodes it before use.
-	raw, err := json.Marshal(map[string]any{
-		"stream_id":        "stream-42",
-		"host_callback_id": "cb-7",
-		"model":            "workbuddy",
-		"payload":          []byte(`{"messages":[]}`),
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		t.Fatalf("unmarshal wire: %v", err)
-	}
-	if wire.StreamID != "stream-42" {
-		t.Fatalf("stream id = %q, want stream-42", wire.StreamID)
-	}
-	if wire.HostCallbackID != "cb-7" {
-		t.Fatalf("callback id = %q, want cb-7", wire.HostCallbackID)
-	}
-	if wire.Model != "workbuddy" {
-		t.Fatalf("embedded request lost its model: %q", wire.Model)
-	}
-
-	// A host that does not stream sends no stream id, and the batch path stays
-	// the answer for that call.
-	var plain executorWire
-	if err := json.Unmarshal([]byte(`{"model":"m"}`), &plain); err != nil {
-		t.Fatalf("unmarshal plain: %v", err)
-	}
-	if plain.StreamID != "" {
-		t.Fatalf("stream id = %q, want empty", plain.StreamID)
-	}
-}
 
 // An event can arrive across several reads, so an incomplete payload is held
 // until its braces balance rather than emitted as half an object.
