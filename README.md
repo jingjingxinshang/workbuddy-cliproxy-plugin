@@ -15,6 +15,7 @@
 - 面板内账号页：多账号列表（昵称 / UID / 企业 / 区域 / 套餐 / 额度 / 凭据到期 / 签到状态）
 - 每日签到：`/billing/meter/checkin-status` + `/billing/meter/daily-checkin`，**仅手动触发**（账号页按钮或管理接口），插件不会自动领取
 - 区域自动识别：`region` 字段缺失时按凭据自身的 `domain` 判定（`workbuddy.ai` / `codebuddy.ai` → 国际）
+- 国际版每日奖励（自动）：向 `/v2/report` 上报一次活动，让国际账号拿到每日 30 credits 奖励包
 - CPA Plugin Store Registry 发布结构
 
 ## 本地构建
@@ -190,6 +191,49 @@ POST /billing/meter/daily-checkin    领取每日奖励
 `checkin-status` 返回的 `today_checked_in` 描述的是一个**签到活动**，不是每日奖励。没有活动时上游把整块字段归零（`active:false`、`today_checked_in:false`），把它读成「今天没签到」会误报已经领过的账号。因此没有活动时插件报 `unknown` 而不是 `unclaimed`。
 
 领取接口才是权威来源：重复领取会返回 `code=10001`（HTTP 400，「今天已签到，请明天再来」），插件把这个结果算作已签到而不是失败。所以「签到」按钮始终可用，点一下就能得到确定结论。
+
+## 国际版每日奖励（自动）
+
+**国际账号没有每日签到**：国内那个领取动作是桌面应用的 deep link，所以国际账号的
+签到状态接口永远返回 `active:false` —— 看起来像是完全没有每日收入。
+
+实际上国际版提供了 growth 中心那一族接口，收入路径就是官方客户端每次对话都会发的
+活动信标：向 `POST /v2/report` 发一个 `chat_request_send` 事件点亮当天，当天在
+`GET /activity/growth/heatmap` 里 `score > 0`，次日就会发放一个 **30 credits 的
+Bonus Pack**（次日凌晨落地）。连续天数还能解锁 14 天 / 28 天的额外档位。
+
+```text
+GET  /activity/growth/heatmap   读今天的 score（只读，不领取）
+POST /v2/report                 上报一次活动，点亮当天
+```
+
+**只对国际账号生效**，国内账号一律跳过（它们走签到）。
+
+| 项目 | 值 |
+|---|---|
+| 计划时间 | 本地时间 08:00 / 12:00 / 16:00 / 20:00（每小时窗口） |
+| 开关 | `daily_bonus`，不写 = 启用 |
+| 手动触发 | `POST /v0/management/workbuddy/dailybonus`（可带 `?auth_index=`） |
+| 运行状态 | `GET /v0/management/workbuddy/dailybonus/status` |
+
+两条设计规则让它一天跑四次是安全的：
+
+- **「今天」取自接口自己的 heatmap 最后一格**，不看本地时钟 —— 所以没有时区运算，也
+  不会在日期边界出错。
+- **上报永不重试**。事件在上游是按天幂等的，但盲重发会把当天计数翻倍（`score` 2 → 4）。
+  发失败就等下一个时段；一天四个时段本来就是安全网，而且已点亮的账号只会多一次只读
+  查询。
+
+关掉自动运行：
+
+```yaml
+plugins:
+  configs:
+    workbuddy:
+      daily_bonus: false
+```
+
+关掉后仍可用上面的管理接口手动触发，或者只对某个账号触发。
 
 登录成功后，WorkBuddy 模型会出现在 CPA 的模型列表中。
 

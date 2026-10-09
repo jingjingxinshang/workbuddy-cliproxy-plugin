@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.13"
+	pluginVer   = "0.3.14"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -121,6 +121,10 @@ type loginState struct {
 // there is no separate place an operator has to configure WorkBuddy login.
 type pluginConfig struct {
 	DefaultRegion string `yaml:"default_region"`
+	// DailyBonus gates the scheduled international reward. It is a pointer so an
+	// absent key stays distinguishable from an explicit false; absent means
+	// enabled, because the engine only ever touches international credentials.
+	DailyBonus *bool `yaml:"daily_bonus"`
 }
 
 // lifecycleRequest is the plugin.register / plugin.reconfigure payload. The
@@ -279,7 +283,15 @@ func cliproxyPluginFree(ptr unsafe.Pointer, length C.size_t) {
 }
 
 //export cliproxyPluginShutdown
-func cliproxyPluginShutdown() { hostAPI = nil }
+func cliproxyPluginShutdown() {
+	// Intentionally empty.
+	//
+	// The host calls this on its own exit path and unloads the library right
+	// afterwards, while the scheduled reward goroutine may still be running.
+	// Touching Go runtime state here -- a mutex, a channel close, a pointer the
+	// scheduler reads -- is what produces SIGSEGVs in cgo, and none of it is
+	// needed: the process is ending, so the OS reclaims everything.
+}
 
 func handleMethod(method string, raw []byte) ([]byte, error) {
 	switch method {
@@ -344,6 +356,16 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 					Path:        "/workbuddy/checkin",
 					Description: "为指定账号或全部账号执行每日签到",
 				},
+				{
+					Method:      "POST",
+					Path:        "/workbuddy/dailybonus",
+					Description: "为指定账号或全部国际账号上报今日活动，领取每日 30 credits 奖励",
+				},
+				{
+					Method:      "GET",
+					Path:        "/workbuddy/dailybonus/status",
+					Description: "读取国际每日奖励的开关、计划时间与最近一次运行结果",
+				},
 			},
 		})
 	case pluginabi.MethodManagementHandle:
@@ -358,7 +380,7 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 }
 
 func registrationData() registration {
-	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: pluginapi.Metadata{Name: pluginName, Version: pluginVer, Author: "WorkBuddy CPA Plugin", GitHubRepository: "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin", ConfigFields: []pluginapi.ConfigField{{Name: "default_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "WorkBuddy cluster new logins default to. The panel's OAuth card starts a login without parameters, so this decides between the CN and INTL clusters."}}}, Capabilities: registrationCapability{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"chat-completions"}, ExecutorOutputFormats: []string{"chat-completions"}, CommandLinePlugin: true, ManagementAPI: true, QuotaProvider: true}}
+	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: pluginapi.Metadata{Name: pluginName, Version: pluginVer, Author: "WorkBuddy CPA Plugin", GitHubRepository: "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin", ConfigFields: []pluginapi.ConfigField{{Name: "default_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "WorkBuddy cluster new logins default to. The panel's OAuth card starts a login without parameters, so this decides between the CN and INTL clusters."}, {Name: "daily_bonus", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable the scheduled international daily credit reward at 08:00/12:00/16:00/20:00 local time (default true). It reports one activity event per international account so each earns its 30-credit daily pack, and is idempotent per account per day. Domestic accounts are never touched."}}}, Capabilities: registrationCapability{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"chat-completions"}, ExecutorOutputFormats: []string{"chat-completions"}, CommandLinePlugin: true, ManagementAPI: true, QuotaProvider: true}}
 }
 
 // configure reads the configuration the host delivers on register and
@@ -366,9 +388,9 @@ func registrationData() registration {
 //
 // Nothing about WorkBuddy login is configured in the plugin's own UI: the panel
 // starts the flow through the host's generic plugin OAuth route, and the host
-// passes this plugin's plugins.configs.workbuddy section here as YAML. Only the
-// default region is read from it, because the panel's OAuth card sends no
-// parameters and therefore cannot pick a cluster.
+// passes this plugin's plugins.configs.workbuddy section here as YAML: the
+// default region (the panel's OAuth card sends no parameters, so it cannot pick
+// a cluster) and whether the scheduled international reward may run.
 func configure(raw []byte) error {
 	cfg := pluginConfig{DefaultRegion: defaultRegion}
 	if len(raw) > 0 {
@@ -1172,11 +1194,21 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 		return checkinRouteResponse(raw)
 	}
 
-	// Quota for one credential.
-	//
-	// The management panel renders quota only for its six built-in providers
-	// (QuotaProviderType is a closed union), so a plugin provider has no place
-	// there. The accounts page is the supported way for a plugin to draw its own
+	// International daily reward. The status route is matched first because
+	// the trigger's own path is a prefix of it.
+	if strings.HasSuffix(path, "/"+providerID+"/dailybonus/status") {
+		if method := managementRequestMethod(raw); method != "" && method != http.MethodGet {
+			return errorManagementResponse(http.StatusMethodNotAllowed, "dailybonus status is a GET route")
+		}
+		return dailyBonusStatusResponse()
+	}
+
+	if strings.HasSuffix(path, "/"+providerID+"/dailybonus") {
+		if method := managementRequestMethod(raw); method != "" && method != http.MethodPost {
+			return errorManagementResponse(http.StatusMethodNotAllowed, "dailybonus is a POST route")
+		}
+		return dailyBonusRouteResponse(raw)
+	}
 	// data.
 	if strings.HasSuffix(path, "/"+providerID+"/quota") {
 		return quotaRouteResponse(raw)
