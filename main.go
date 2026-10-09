@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.12"
+	pluginVer   = "0.3.13"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -75,6 +75,10 @@ const (
 	// defaultRegion is the cluster used when neither the request metadata nor
 	// the plugin configuration names a usable one.
 	defaultRegion = "cn"
+	// intlRegion is the international cluster. It is named once here because the
+	// realm can also be settled from a credential's own domain, which is what a
+	// credential this plugin did not create depends on.
+	intlRegion = "intl"
 )
 
 type regionProfile struct {
@@ -84,9 +88,12 @@ type regionProfile struct {
 	loginPlatform string
 }
 
+// Origin and Referer must name the host the request is actually sent to. The
+// international gateway rejects a request whose Origin belongs to the other
+// host, so the international origin is deliberately the international base.
 var profiles = map[string]regionProfile{
 	"cn":   {baseURL: "https://copilot.tencent.com", origin: "https://www.codebuddy.cn", userAgent: "CLI/2.63.2 CodeBuddy/2.63.2", loginPlatform: "CLI"},
-	"intl": {baseURL: "https://www.codebuddy.ai", origin: "https://www.workbuddy.ai", userAgent: "WorkBuddy/1.0", loginPlatform: "workbuddy-ai"},
+	"intl": {baseURL: "https://www.codebuddy.ai", origin: "https://www.codebuddy.ai", userAgent: "WorkBuddy/1.0", loginPlatform: "workbuddy-ai"},
 }
 
 type workbuddyAuth struct {
@@ -755,8 +762,36 @@ func writeResponse(response *C.cliproxy_buffer, raw []byte) {
 	response.ptr = ptr
 	response.len = C.size_t(len(raw))
 }
+
+// isGlobalDomain reports whether a stored domain belongs to the international
+// service. Both issuers are accepted, because the international realm issues
+// credentials under either name.
+//
+// The match is exact or a dot-suffix, never a substring: "workbuddy.ai.evil.com"
+// and "evilworkbuddy.ai" are not ours, and a loose match would route someone
+// else's credential to the international gateway.
+func isGlobalDomain(domain string) bool {
+	d := strings.ToLower(strings.TrimSpace(domain))
+	return d == "workbuddy.ai" || strings.HasSuffix(d, ".workbuddy.ai") ||
+		d == "codebuddy.ai" || strings.HasSuffix(d, ".codebuddy.ai")
+}
+
+// regionOf resolves the cluster for one stored credential.
+//
+// The stored region wins when it names a cluster. It is absent on credentials
+// this plugin did not create -- a hand-written auth file, or one another tool
+// wrote -- and defaulting those to the domestic cluster sent an international
+// token to the domestic gateway, which answers a non-JSON 401 that surfaces only
+// as a JSON parse failure. The credential's own domain settles it instead; an
+// empty domain keeps the domestic default so legacy files do not move.
 func regionOf(auth workbuddyAuth) string {
-	return normalizeRegion(auth.Region)
+	if region := strings.ToLower(strings.TrimSpace(auth.Region)); profiles[region].baseURL != "" {
+		return region
+	}
+	if isGlobalDomain(auth.Domain) {
+		return intlRegion
+	}
+	return defaultRegion
 }
 func authUserAgent(auth workbuddyAuth, profile regionProfile) string {
 	if auth.UserAgent != "" {
@@ -1059,6 +1094,12 @@ func billingHeaders(auth workbuddyAuth) map[string]string {
 	}
 	if auth.RefreshToken != "" {
 		headers["X-Refresh-Token"] = auth.RefreshToken
+	}
+	// The international gateway reads the realm from this header. The domestic
+	// gateway has never been sent it, so it stays scoped to international
+	// credentials instead of changing a path that already works.
+	if regionOf(auth) == intlRegion && auth.Domain != "" {
+		headers["X-Domain"] = auth.Domain
 	}
 	return headers
 }

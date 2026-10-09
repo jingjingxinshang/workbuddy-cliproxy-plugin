@@ -20,6 +20,79 @@ func TestRegionFallback(t *testing.T) {
 	}
 }
 
+// The stored region is absent on a credential this plugin did not create, and
+// defaulting such a credential to the domestic cluster sent an international
+// token to the domestic gateway, which answers a non-JSON 401 that surfaces only
+// as a JSON parse failure. The credential's own domain has to settle it.
+func TestRegionOfFallsBackToTheCredentialDomain(t *testing.T) {
+	cases := []struct {
+		name string
+		auth workbuddyAuth
+		want string
+	}{
+		{"stored region wins over the domain", workbuddyAuth{Region: "cn", Domain: "www.workbuddy.ai"}, "cn"},
+		{"workbuddy.ai domain", workbuddyAuth{Domain: "www.workbuddy.ai"}, "intl"},
+		{"codebuddy.ai domain", workbuddyAuth{Domain: "www.codebuddy.ai"}, "intl"},
+		{"domestic domain", workbuddyAuth{Domain: "www.codebuddy.cn"}, "cn"},
+		{"no domain keeps the default", workbuddyAuth{}, "cn"},
+		{"unusable region falls through to the domain", workbuddyAuth{Region: "moon", Domain: "www.workbuddy.ai"}, "intl"},
+	}
+	for _, tc := range cases {
+		if got := regionOf(tc.auth); got != tc.want {
+			t.Errorf("%s: regionOf() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A substring match would route another domain's credential to the
+// international gateway, so the match has to be whole labels only.
+func TestIsGlobalDomainMatchesWholeLabelsOnly(t *testing.T) {
+	global := []string{"workbuddy.ai", "www.workbuddy.ai", "codebuddy.ai", "sub.codebuddy.ai", "WORKBUDDY.AI", "  www.workbuddy.ai  "}
+	for _, domain := range global {
+		if !isGlobalDomain(domain) {
+			t.Errorf("isGlobalDomain(%q) = false, want true", domain)
+		}
+	}
+	notGlobal := []string{"", "www.codebuddy.cn", "evilworkbuddy.ai", "workbuddy.ai.evil.com", "notworkbuddy.ai", "workbuddy.ai.evil"}
+	for _, domain := range notGlobal {
+		if isGlobalDomain(domain) {
+			t.Errorf("isGlobalDomain(%q) = true, want false", domain)
+		}
+	}
+}
+
+// The international realm rejects a request whose Origin names the other
+// international host, so origin and host have to agree. The origin used to be
+// the other international host while requests went to this one.
+func TestRegionalHostsAndOrigins(t *testing.T) {
+	if got := profiles["cn"].baseURL; got != "https://copilot.tencent.com" {
+		t.Errorf("domestic host = %q", got)
+	}
+	if got := profiles["cn"].origin; got != "https://www.codebuddy.cn" {
+		t.Errorf("domestic origin = %q", got)
+	}
+	if got := profiles["intl"].baseURL; got != "https://www.codebuddy.ai" {
+		t.Errorf("international host = %q", got)
+	}
+	if got := profiles["intl"].origin; got != profiles["intl"].baseURL {
+		t.Errorf("international origin %q must name the host %q it sends to", got, profiles["intl"].baseURL)
+	}
+}
+
+// The international gateway reads the realm from X-Domain. The domestic gateway
+// has never been sent it, so adding it there would change a path that works.
+func TestBillingHeadersSendDomainOnlyForInternational(t *testing.T) {
+	intl := workbuddyAuth{AccessToken: "t", Domain: "www.workbuddy.ai"}
+	if got := billingHeaders(intl)["X-Domain"]; got != "www.workbuddy.ai" {
+		t.Errorf("international X-Domain = %q, want the credential domain", got)
+	}
+
+	domestic := workbuddyAuth{AccessToken: "t", Domain: "www.codebuddy.cn"}
+	if got, present := billingHeaders(domestic)["X-Domain"]; present {
+		t.Errorf("domestic X-Domain = %q, want the header absent", got)
+	}
+}
+
 func TestSplitSSE(t *testing.T) {
 	chunks := splitSSE([]byte("data: {\"a\":1}\n\n\ndata: [DONE]\n\n"))
 	if len(chunks) != 2 {

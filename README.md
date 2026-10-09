@@ -14,6 +14,7 @@
 - QuotaProvider：`/billing/meter/get-user-resource` 额度查询
 - 面板内账号页：多账号列表（昵称 / UID / 企业 / 区域 / 套餐 / 额度 / 凭据到期 / 签到状态）
 - 每日签到：`/billing/meter/checkin-status` + `/billing/meter/daily-checkin`，**仅手动触发**（账号页按钮或管理接口），插件不会自动领取
+- 区域自动识别：`region` 字段缺失时按凭据自身的 `domain` 判定（`workbuddy.ai` / `codebuddy.ai` → 国际）
 - CPA Plugin Store Registry 发布结构
 
 ## 本地构建
@@ -126,6 +127,25 @@ plugins:
 curl -H "Authorization: Bearer <MANAGEMENT_KEY>" \
   "http://127.0.0.1:8317/v0/management/workbuddy-auth-url?region=intl"
 ```
+
+### 国内 / 国际的主机与判定
+
+两个集群是**不同的网关**，token 不能混用（发错主机会返回非 JSON 的 401，在日志里只表现为 JSON 解析失败）：
+
+| | 国内 | 国际 |
+|---|---|---|
+| 网关（base） | `https://copilot.tencent.com` | `https://www.codebuddy.ai` |
+| Origin / Referer | `https://www.codebuddy.cn` | `https://www.codebuddy.ai` |
+
+Origin/Referer 必须与请求实际发往的主机一致，否则国际网关会按跨源拒绝。
+
+**一个凭证走哪个集群，按这个顺序判定：**
+
+1. 凭据里的 `region` 字段（本插件登录时写入）；
+2. 否则看凭据自己的 `domain`：`workbuddy.ai`、`codebuddy.ai` 及其子域 → 国际；
+3. 否则用 `default_region`（默认 `cn`）。
+
+第 2 条很重要：**不是本插件创建的凭据**（手写的 auth 文件，或别的工具写的）没有 `region` 字段。只按第 1 条判定时它们会一律落到国内网关，国际 token 因此被拒 —— 这正是「国际账号报 JSON 解析失败」的成因。domain 匹配只认整段标签（`workbuddy.ai` 或 `.workbuddy.ai` 结尾），`evilworkbuddy.ai` 这类不会被误判。
 
 ## 账号页
 
