@@ -465,6 +465,60 @@ func TestAccountsPageDoesNotClaimOnOpen(t *testing.T) {
 	}
 }
 
+// The refresh token is a long-lived credential that can mint new access tokens.
+// It belongs on the refresh endpoint and nowhere else: any other call writes it
+// into the upstream's request logs.
+func TestRefreshTokenIsSentOnlyToTheRefreshEndpoint(t *testing.T) {
+	headers := make(chan http.Header, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case headers <- r.Header.Clone():
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"accessToken":"new","refreshToken":"r2","expiresIn":3600}}`))
+	}))
+	defer server.Close()
+	stubRegion(t, server.URL)
+
+	raw, errMarshal := json.Marshal(pluginapi.AuthRefreshRequest{
+		AuthID:      "auth-1",
+		StorageJSON: []byte(`{"access_token":"old","refresh_token":"refresh-secret","region":"cn"}`),
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal refresh request: %v", errMarshal)
+	}
+	if resp := refreshAuth(raw); resp.Auth.ID != "auth-1" {
+		t.Fatalf("refresh did not run, so this test proved nothing: %+v", resp.Auth)
+	}
+
+	select {
+	case sent := <-headers:
+		if got := sent.Get("X-Refresh-Token"); got != "refresh-secret" {
+			t.Fatalf("refresh endpoint X-Refresh-Token = %q, want the refresh token", got)
+		}
+	default:
+		t.Fatal("no refresh request was made")
+	}
+}
+
+// ...and the same credential must not ride along on anything else.
+func TestChatAndBillingHeadersCarryNoRefreshToken(t *testing.T) {
+	auth := workbuddyAuth{AccessToken: "access", RefreshToken: "refresh-secret", UID: "uid-1", Region: "cn"}
+
+	chat := chatHeaders(auth, profiles["cn"])
+	if got, present := chat["X-Refresh-Token"]; present {
+		t.Fatalf("the chat request carries the refresh token (%q), which leaks a long-lived credential into upstream logs", got)
+	}
+	if chat["Authorization"] != "Bearer access" {
+		t.Fatalf("chat Authorization = %q, want the access token", chat["Authorization"])
+	}
+
+	if got, present := billingHeaders(auth)["X-Refresh-Token"]; present {
+		t.Fatalf("the billing request carries the refresh token (%q)", got)
+	}
+}
+
 // A route method the host never sends (it dispatches by exact method and path)
 // must not be answered as if it were the real one.
 func TestCheckinRouteRejectsNonPost(t *testing.T) {

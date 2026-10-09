@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.15"
+	pluginVer   = "0.3.16"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -709,8 +709,14 @@ func upstreamWithin(budget time.Duration, method, target, origin, userAgent stri
 	return resp.StatusCode, data, err
 }
 
+// chatHeaders builds the headers for one chat-completions request.
+//
+// The refresh token is deliberately absent. It is a long-lived credential that
+// can mint new access tokens, so it belongs on the refresh endpoint and nowhere
+// else: sending it with every chat would write it into the upstream's request
+// logs on every call. It is only ever set by refreshAuth.
 func chatHeaders(auth workbuddyAuth, profile regionProfile) map[string]string {
-	h := map[string]string{"Authorization": "Bearer " + auth.AccessToken, "X-Refresh-Token": auth.RefreshToken, "X-Product": "SaaS", "X-No-Department-Info": "1", "X-Requested-With": "XMLHttpRequest"}
+	h := map[string]string{"Authorization": "Bearer " + auth.AccessToken, "X-Product": "SaaS", "X-No-Department-Info": "1", "X-Requested-With": "XMLHttpRequest"}
 	if auth.UID != "" {
 		h["X-User-Id"] = auth.UID
 	}
@@ -1100,6 +1106,10 @@ func capacityValue(value *float64) float64 {
 	return *value
 }
 
+// billingHeaders builds the headers for the quota, check-in and growth calls.
+//
+// Like chatHeaders it carries no refresh token: those calls only need the access
+// token, and the long-lived one is confined to refreshAuth.
 func billingHeaders(auth workbuddyAuth) map[string]string {
 	headers := map[string]string{
 		"Authorization":     "Bearer " + auth.AccessToken,
@@ -1111,9 +1121,6 @@ func billingHeaders(auth workbuddyAuth) map[string]string {
 	}
 	if auth.EnterpriseID != "" {
 		headers["X-Enterprise-Id"] = auth.EnterpriseID
-	}
-	if auth.RefreshToken != "" {
-		headers["X-Refresh-Token"] = auth.RefreshToken
 	}
 	// The international gateway reads the realm from this header. The domestic
 	// gateway has never been sent it, so it stays scoped to international
