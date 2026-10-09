@@ -62,7 +62,7 @@ import (
 const (
 	providerID  = "workbuddy"
 	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.14"
+	pluginVer   = "0.3.15"
 	loginTTL    = 5 * time.Minute
 	pollTimeout = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
@@ -662,9 +662,7 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	if err := json.Unmarshal(req.StorageJSON, &auth); err != nil || auth.AccessToken == "" {
 		return errorEnvelope("authentication_error", "WorkBuddy auth is missing", http.StatusUnauthorized), nil
 	}
-	profile := profiles[regionOf(auth)]
-	headers := chatHeaders(auth, profile)
-	status, body, err := upstreamWithin(chatTimeout, "POST", profile.baseURL+"/v2/chat/completions", profile.origin, authUserAgent(auth, profile), headers, req.Payload, stream)
+	status, body, err := executeChat(req.AuthID, auth, req.Payload, stream)
 	if err != nil {
 		return errorEnvelope("upstream_error", err.Error(), http.StatusBadGateway), nil
 	}
@@ -1272,6 +1270,12 @@ type hostAuthFileEntry struct {
 	Name      string `json:"name"`
 	Provider  string `json:"provider"`
 	Label     string `json:"label"`
+	// Disabled and Status are read only by the chat failover, which must not
+	// retry a request on an account an operator has switched off. A host that
+	// does not send them leaves the zero values, which simply means "not known to
+	// be disabled".
+	Disabled bool   `json:"disabled,omitempty"`
+	Status   string `json:"status,omitempty"`
 }
 
 // resolveAuthIndex picks the credential to query.
