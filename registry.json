@@ -1,20 +1,25 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "plugins": [
     {
       "id": "workbuddy",
       "name": "WorkBuddy",
-      "description": "WorkBuddy login, model discovery, token refresh and chat execution for CLIProxyAPI.",
-      "author": "WorkBuddy CPA Plugin",
-      "version": "0.3.17",
+      "description": "CLIProxyAPI provider for WorkBuddy / CodeBuddy, domestic and international. Browser OAuth login with multi-account support, model discovery, chat execution, an accounts page with per-account quota and reset times, the international 30-credit daily reward, and in-plugin 429 / code-6004 account failover.",
+      "author": "jingjingxinshang",
+      "version": "0.3.18",
+      "release_tag": "0.3.18",
       "repository": "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin",
       "homepage": "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin",
+      "logo": "https://raw.githubusercontent.com/jingjingxinshang/workbuddy-cliproxy-plugin/main/logo.png",
       "license": "MIT",
       "tags": [
-        "workbuddy",
-        "oauth",
-        "chat-completions",
-        "model-provider"
+        "Provider",
+        "OAuth",
+        "WorkBuddy",
+        "CodeBuddy",
+        "Intl",
+        "Quota",
+        "Management"
       ],
       "install": {
         "type": "github-release"

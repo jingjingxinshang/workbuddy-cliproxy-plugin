@@ -60,11 +60,16 @@ import (
 )
 
 const (
-	providerID  = "workbuddy"
-	pluginName  = "WorkBuddy"
-	pluginVer   = "0.3.17"
-	loginTTL    = 5 * time.Minute
-	pollTimeout = 20 * time.Second
+	providerID = "workbuddy"
+	pluginName = "WorkBuddy"
+	pluginVer  = "0.3.18"
+	// pluginAuthor and pluginLogoURL are the same values the store registry
+	// carries, so the panel card and the store entry describe one plugin rather
+	// than two.
+	pluginAuthor  = "jingjingxinshang"
+	pluginLogoURL = "https://raw.githubusercontent.com/jingjingxinshang/workbuddy-cliproxy-plugin/main/logo.png"
+	loginTTL      = 5 * time.Minute
+	pollTimeout   = 20 * time.Second
 	// chatTimeout bounds one chat request. It has to exist separately because
 	// upstream's default budget is pollTimeout, which is the login-poll budget:
 	// reusing it for chat cut off every answer that took longer than 20 seconds,
@@ -380,7 +385,7 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 }
 
 func registrationData() registration {
-	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: pluginapi.Metadata{Name: pluginName, Version: pluginVer, Author: "WorkBuddy CPA Plugin", GitHubRepository: "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin", ConfigFields: []pluginapi.ConfigField{{Name: "default_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "WorkBuddy cluster new logins default to. The panel's OAuth card starts a login without parameters, so this decides between the CN and INTL clusters."}, {Name: "daily_bonus", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable the scheduled international daily credit reward at 08:00/12:00/16:00/20:00 local time (default true). It reports one activity event per international account so each earns its 30-credit daily pack, and is idempotent per account per day. Domestic accounts are never touched."}}}, Capabilities: registrationCapability{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"chat-completions"}, ExecutorOutputFormats: []string{"chat-completions"}, CommandLinePlugin: true, ManagementAPI: true, QuotaProvider: true}}
+	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: pluginapi.Metadata{Name: pluginName, Version: pluginVer, Author: pluginAuthor, GitHubRepository: "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin", Logo: pluginLogoURL, ConfigFields: []pluginapi.ConfigField{{Name: "default_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "WorkBuddy cluster new logins default to. The panel's OAuth card starts a login without parameters, so this decides between the CN and INTL clusters."}, {Name: "daily_bonus", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable the scheduled international daily credit reward at 08:00/12:00/16:00/20:00 local time (default true). It reports one activity event per international account so each earns its 30-credit daily pack, and is idempotent per account per day. Domestic accounts are never touched."}}}, Capabilities: registrationCapability{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"chat-completions"}, ExecutorOutputFormats: []string{"chat-completions"}, CommandLinePlugin: true, ManagementAPI: true, QuotaProvider: true}}
 }
 
 // configure reads the configuration the host delivers on register and

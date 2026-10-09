@@ -44,7 +44,8 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=1 \
 项目包含：
 
 - `registry.json`：CPA 可查询的 Registry 示例
-- `.github/workflows/release.yml`：构建 Linux amd64/arm64、macOS amd64/arm64 并发布 GitHub Release
+- `.github/workflows/release.yml`：在 Ubuntu runner 上构建 Linux amd64/arm64 并发布 GitHub Release。`-buildmode=c-shared` 链到 Linux 头文件，本机 macOS **无法**交叉编译（cgo 会拿到 macOS SDK 的头，报 `clearenv`/`setresgid` 未声明），所以产物只能出在 CI 里
+- `logo.png`：商店条目与面板卡片用的图标
 
 发布新版本时：
 
@@ -52,12 +53,39 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=1 \
 2. 提交后创建一个不带 `v` 前缀的版本标签并推送，工作流会自动构建 Linux amd64/arm64 并发布 GitHub Release：
 
 ```bash
-# 标签号必须与上面两处版本号一致
-git tag 0.3.0
-git push origin 0.3.0
+# 标签号必须与上面两处版本号一致，且本项目不带 v 前缀
+git tag 0.3.18
+git push origin 0.3.18
 ```
 
 注意：注册表里宣告的版本必须在 Release 里真实存在，否则商店显示可更新却下载不到包。
+
+### Registry 字段
+
+```json
+{
+  "schema_version": 2,
+  "plugins": [{
+    "id": "workbuddy",
+    "name": "WorkBuddy",
+    "description": "...",
+    "author": "jingjingxinshang",
+    "version": "0.3.18",
+    "release_tag": "0.3.18",
+    "repository": "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin",
+    "homepage": "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin",
+    "logo": "https://raw.githubusercontent.com/jingjingxinshang/workbuddy-cliproxy-plugin/main/logo.png",
+    "license": "MIT",
+    "tags": ["Provider", "OAuth", "WorkBuddy", "CodeBuddy", "Intl", "Quota", "Management"],
+    "install": { "type": "github-release" }
+  }]
+}
+```
+
+- `id` 必须与插件文件名一致（`workbuddy.so`）：宿主是用**文件名**推插件 id 的，改名会让磁盘上已有的凭据失联。
+- `version` 与 `release_tag` 都必须指向真实存在的 Release。本项目标签**不带 `v` 前缀**，所以两者相同。
+- `logo` 写 raw 地址，商店列表和面板卡片都会用它（面板侧同时来自插件注册的 `Metadata.Logo`，两边保持一致）。
+- **只改描述/标签/图标这类元数据不需要重新发版**：商店每次都直接读 `registry.json`。只有 `version` 变了才需要新 Release。
 
 Registry 使用 `github-release` 安装类型。CPA 会根据当前 `GOOS/GOARCH` 查询 Release 资产、下载、校验并放入配置的插件目录。
 
