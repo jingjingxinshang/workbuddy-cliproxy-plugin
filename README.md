@@ -169,6 +169,8 @@ POST /v0/management/workbuddy/checkin[?auth_index=|?name=]   签到（不带参�
 
 每个账号一张卡片，展示昵称、UID、企业 ID、区域、凭据状态与到期时间、当前套餐、剩余额度与重置时间、签到状态与连续天数，并提供单独的「签到」按钮；顶部有「全部签到」。页面会先列出所有凭据再逐个查额度，不带 `auth_index` 时取第一个凭据。
 
+**国际账号的卡片按钮是「领取奖励」而不是「签到」**：国际账号根本没有每日签到（那个动作是桌面应用的 deep link），它的每日收入是 growth 上报，所以给一个只可能回答 `unknown` 的按钮是误导。「已点亮」后按钮变灰，徽标取自最近一次运行结果（页面载入时从 `dailybonus/status` 读一次）。
+
 账号页存在的必要性：面板只为六个内置 provider 渲染额度（`QuotaProviderType` 是封闭联合类型），插件 provider 在面板里既没有额度位置也没有账号视图，因此插件用自己的资源页展示账号、额度与签到。
 
 ## 每日签到
@@ -214,8 +216,8 @@ POST /v2/report                 上报一次活动，点亮当天
 |---|---|
 | 计划时间 | 本地时间 08:00 / 12:00 / 16:00 / 20:00（每小时窗口） |
 | 开关 | `daily_bonus`，不写 = 启用 |
-| 手动触发 | `POST /v0/management/workbuddy/dailybonus`（可带 `?auth_index=`） |
-| 运行状态 | `GET /v0/management/workbuddy/dailybonus/status` |
+| 手动触发 | 顶部「国际奖励」按钮，或 `POST /v0/management/workbuddy/dailybonus`（可带 `?auth_index=`） |
+| 运行状态 | `GET /v0/management/workbuddy/dailybonus/status`；页面载入时读一次，用来画卡片上的徽标 |
 
 两条设计规则让它一天跑四次是安全的：
 

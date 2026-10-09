@@ -519,6 +519,29 @@ func TestChatAndBillingHeadersCarryNoRefreshToken(t *testing.T) {
 	}
 }
 
+// The page's JavaScript lives inside a Go string literal, so a Go spelling can
+// leak into it without the compiler noticing. That is exactly how
+// "function boot()" became "func boot()": one character short of valid, and the
+// whole page stops running because the script never parses. Nothing else in the
+// suite catches it -- the other page tests assert on substrings, which a broken
+// script still contains.
+func TestAccountsPageCarriesNoGoSpelling(t *testing.T) {
+	page := accountsPageHTML()
+	for number, line := range strings.Split(page, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "func ") {
+			t.Fatalf("line %d of the served page is Go, not JavaScript: %q", number+1, trimmed)
+		}
+	}
+	// The two spellings that a copy from the Go side actually produced.
+	if strings.Contains(page, "func boot(") {
+		t.Fatal(`the page contains "func boot(" instead of "function boot("`)
+	}
+	if !strings.Contains(page, "function boot(") {
+		t.Fatal("the page no longer defines boot()")
+	}
+}
+
 // A route method the host never sends (it dispatches by exact method and path)
 // must not be answered as if it were the real one.
 func TestCheckinRouteRejectsNonPost(t *testing.T) {

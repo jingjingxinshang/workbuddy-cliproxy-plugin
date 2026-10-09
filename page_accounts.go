@@ -226,13 +226,14 @@ func accountsPageHTML() string {
     <div class="logo">WB</div>
     <div>
       <h1>WorkBuddy 账号</h1>
-      <p>额度与每日签到</p>
+      <p>额度、签到与国际奖励</p>
     </div>
   </div>
   <div class="actions">
     <label class="sr-only" for="key">管理密钥</label>
     <input id="key" type="password" placeholder="管理密钥" autocomplete="off" spellcheck="false">
     <button id="checkin-all" class="ghost" type="button"><svg class="ico" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>全部签到</button>
+    <button id="bonus-all" class="ghost" type="button"><svg class="ico" viewBox="0 0 24 24"><path d="M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5"/><path d="M16 12h.01"/></svg>国际奖励</button>
     <button id="refresh" type="button"><svg class="ico" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>刷新</button>
   </div>
 </header>
@@ -275,11 +276,12 @@ var queryInput = document.getElementById('query');
 var sortSelect = document.getElementById('sort');
 var refreshButton = document.getElementById('refresh');
 var checkinAllButton = document.getElementById('checkin-all');
+var bonusAllButton = document.getElementById('bonus-all');
 
 // quota holds what came back per credential, errors holds the ones that failed,
 // and pending tracks in-flight reads so a card can show a spinner without the
 // whole list re-rendering.
-var state = { accounts: [], quota: {}, errors: {}, pending: {}, runs: {}, filter: 'all', query: '', sort: 'risk' };
+var state = { accounts: [], quota: {}, errors: {}, pending: {}, runs: {}, bonus: {}, filter: 'all', query: '', sort: 'risk' };
 
 // Summary and filter chrome cost attention, so they only appear once there are
 // enough accounts that the wall cannot be read at a glance. With a single
@@ -553,6 +555,21 @@ function accountCard(account) {
   var view = checkinView(account.checkin);
   var label = accountLabel(account);
   var initial = String(label).trim().charAt(0).toUpperCase() || 'W';
+  // An international account has no daily check-in at all -- the domestic
+  // action is a desktop-application deep link -- so its daily income is the
+  // growth report and the card offers that instead of a button that could only
+  // ever answer "unknown".
+  var international = account.region === 'intl';
+  var bonus = international ? state.bonus[key] : null;
+  var earned = bonus && (bonus.status === 'reported' || bonus.status === 'already-lit');
+  var action = international
+    ? '<button class="' + (earned ? 'ghost' : '') + '" type="button" data-bonus="' + esc(key) + '">' +
+        svg('wallet') + (earned ? '今日已点亮' : '领取奖励') + '</button>'
+    : '<button class="' + (view.done ? 'ghost' : '') + '" type="button" data-checkin="' + esc(key) + '"' +
+        (view.done ? ' disabled' : '') + '>' + svg('check') + (view.done ? '已签到' : '签到') + '</button>';
+  var bonusNote = '';
+  if (bonus && bonus.status === 'failed') bonusNote = '国际奖励：' + (bonus.detail || '失败');
+  else if (bonus && bonus.status === 'already-lit' && bonus.day) bonusNote = '国际奖励：' + bonus.day + ' 已点亮';
   // The expiry is the one fact worth a line under the name: a credential that
   // stops refreshing shows up here before it shows up as a failed request. It
   // replaced the credential filename, which was an opaque id that told the
@@ -574,9 +591,9 @@ function accountCard(account) {
       '<button class="icon" type="button" title="刷新额度" aria-label="刷新额度" data-quota="' + esc(key) + '">' +
         svg('refresh') + '</button>' +
       (view.detail ? '<span class="foot-note">' + esc(view.detail) + '</span>' : '') +
+      (bonusNote ? '<span class="foot-note">' + esc(bonusNote) + '</span>' : '') +
       '<span class="spacer"></span>' +
-      '<button class="' + (view.done ? 'ghost' : '') + '" type="button" data-checkin="' + esc(key) + '"' +
-        (view.done ? ' disabled' : '') + '>' + svg('check') + (view.done ? '已签到' : '签到') + '</button>' +
+      action +
     '</div>' +
   '</article>';
 }
@@ -707,6 +724,7 @@ function setRunning(key, running) {
   state.runs[key] = running;
   var busy = Object.keys(state.runs).some(function (item) { return state.runs[item]; });
   checkinAllButton.disabled = busy;
+  bonusAllButton.disabled = busy;
   refreshButton.disabled = busy;
 }
 
@@ -743,8 +761,64 @@ function loadQuota(authIndex, quiet) {
     });
 }
 
-function claim(authIndex) {
-  var account = accountByAuthIndex(authIndex);
+function loadBonusStatus() {
+  return fetch('/v0/management/workbuddy/dailybonus/status', { headers: headers() })
+    .then(function (resp) { return resp.ok ? resp.json() : null; })
+    .then(function (body) {
+      var last = body && body.last_run;
+      var results = (last && last.results) || [];
+      state.bonus = {};
+      results.forEach(function (row) {
+        if (row && row.auth_index) state.bonus[row.auth_index] = row;
+      });
+      render();
+    })
+    // The badge is decoration: an unreadable status must not take the page down.
+    .catch(function () {});
+}
+
+// claimBonus asks the plugin to report today's growth activity. The report is
+// what lights the day; the 30-credit pack lands on the following day, so the
+// quota shown now is unchanged and is not re-read.
+function claimBonus(authIndex) {
+  if (state.runs[authIndex]) return Promise.resolve();
+  setRunning(authIndex, true);
+  var url = '/v0/management/workbuddy/dailybonus';
+  if (authIndex) url += '?auth_index=' + encodeURIComponent(authIndex);
+  return fetch(url, { method: 'POST', headers: headers() })
+    .then(function (resp) { return resp.json(); })
+    .then(function (body) {
+      var results = (body && body.results) || [];
+      if (!results.length) { toast('国际奖励失败：响应缺少结果', 'err'); return; }
+      results.forEach(function (row) {
+        if (row && row.auth_index) state.bonus[row.auth_index] = row;
+      });
+      var reported = 0;
+      var lit = 0;
+      var failed = 0;
+      var skipped = 0;
+      results.forEach(function (row) {
+        if (row.status === 'reported') reported += 1;
+        else if (row.status === 'already-lit') lit += 1;
+        else if (row.status === 'failed') failed += 1;
+        else if (row.status === 'skipped') skipped += 1;
+      });
+      render();
+      if (failed) toast('国际奖励：' + reported + ' 个已上报，' + failed + ' 个失败', 'err');
+      else if (reported) toast('国际奖励：' + reported + ' 个已上报，次日发放 30 credits', 'ok');
+      else if (lit) toast('国际奖励：今天已经全部点亮过了。', 'ok');
+      else if (skipped === results.length) toast('没有国际版账号需要领取。', '');
+    })
+    .catch(function (err) { toast('国际奖励请求失败：' + err, 'err'); })
+    .then(function () { setRunning(authIndex, false); });
+}
+
+function claimBonusAll() {
+  if (!state.accounts.length) return Promise.resolve();
+  return claimBonus('');
+}
+
+function claim(authIndex) {  var account = accountByAuthIndex(authIndex);
   if (!account || state.runs[authIndex]) return Promise.resolve();
   setRunning(authIndex, true);
   return fetch('/v0/management/workbuddy/checkin?auth_index=' + encodeURIComponent(authIndex), {
@@ -837,7 +911,11 @@ function load() {
         return null;
       }
       render();
-      return Promise.all(state.accounts.map(function (account) { return loadQuota(account.auth_index, true); }));
+      var quotaLoads = state.accounts.map(function (account) { return loadQuota(account.auth_index, true); });
+      // The reward badge is part of the account's state, so a reload refreshes it
+      // with the accounts rather than only when someone clicks the button.
+      quotaLoads.push(loadBonusStatus());
+      return Promise.all(quotaLoads);
     })
     .catch(function (err) {
       out.innerHTML = '<div class="state err"><div class="title">读取失败</div>' +
@@ -849,7 +927,7 @@ function load() {
 // The page does not claim on open. Nothing upstream requires the bonus to be
 // taken the moment the page loads, and a page that is labelled as a view should
 // not mutate an account just because it was opened. Claiming is the two buttons.
-func boot() {
+function boot() {
   if (!keyInput.value.trim()) return;
   load();
 }
@@ -863,6 +941,8 @@ out.addEventListener('click', function (event) {
   }
   var checkinButton = event.target.closest('button[data-checkin]');
   if (checkinButton) claim(checkinButton.getAttribute('data-checkin'));
+  var bonusButton = event.target.closest('button[data-bonus]');
+  if (bonusButton) claimBonus(bonusButton.getAttribute('data-bonus'));
 });
 
 chipsBox.addEventListener('click', function (event) {
@@ -887,6 +967,7 @@ sortSelect.addEventListener('change', function () {
 // made a button labelled "刷新" a mutating action; claiming has its own button.
 refreshButton.onclick = function () { load(); };
 checkinAllButton.onclick = function () { claimAll(); };
+bonusAllButton.onclick = function () { claimBonusAll(); };
 keyInput.addEventListener('keydown', function (event) { if (event.key === 'Enter') boot(); });
 
 boot();
