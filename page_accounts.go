@@ -6,26 +6,43 @@ package main
 // page is a per-provider version of: near-white canvas, white cards with a hair
 // border, one saturated accent for actions and a green reserved for "healthy".
 // Dark is an override because the panel can be showing either theme.
+// themePalette is the page's colour system.
+//
+// Two independent palettes, matching the dashboard this page is loaded
+// inside: a cold graphite base, four levels of surface, and a single
+// indigo accent reserved for interaction. Semantic colours mean state and
+// nothing else. Numbers are monospaced and tabular so a column of them
+// lines up.
 const themePalette = ` :root{
-   --bg:#f5f6f8; --panel:#fff; --panel-2:#fafbfc; --line:#e6e8ec;
-   --text:#1f2328; --muted:#6b7280; --faint:#9ca3af;
-   --accent:#2563eb; --accent-ink:#fff;
-   --ok:#16a34a; --ok-bg:#e9f7ef; --warn:#d97706; --warn-bg:#fef3e2;
-   --danger:#dc2626; --danger-bg:#fdeaea; --info-bg:#eef2ff;
-   --track:#eceef2; --bar:rgba(245,246,248,.86); --hover:#cbd2dc;
-   --shadow:0 1px 2px rgba(16,24,40,.04),0 2px 8px rgba(16,24,40,.05);
-   --shadow-lg:0 8px 28px rgba(16,24,40,.10);
- }
- [data-theme="dark"]{
-   --bg:#0d1117; --panel:#161b22; --panel-2:#1b2028; --line:#2a3038;
-   --text:#e6edf3; --muted:#8b949e; --faint:#6e7681;
-   --accent:#4b83f0; --accent-ink:#fff;
-   --ok:#3fb950; --ok-bg:#14301f; --warn:#d29922; --warn-bg:#33280f;
-   --danger:#f85149; --danger-bg:#3a1d1d; --info-bg:#1b2337;
-   --track:#242a33; --bar:rgba(13,17,23,.86); --hover:#3d444d;
-   --shadow:0 1px 2px rgba(0,0,0,.4),0 3px 12px rgba(0,0,0,.28);
-   --shadow-lg:0 10px 30px rgba(0,0,0,.45);
- }`
+  --bg:#f4f5f8; --panel:#fff; --panel-2:#f8f9fb; --raise:#fff;
+  --line:#e2e5ec; --line-soft:#eceef3;
+  --text:#14171f; --muted:#545c6e; --faint:#8b93a5;
+  --accent:#3d5fe0; --accent-ink:#fff; --accent-soft:rgba(61,95,224,.09);
+  --ok:#0f9d63; --ok-bg:rgba(15,157,99,.10);
+  --warn:#b47611; --warn-bg:rgba(180,118,17,.11);
+  --danger:#cf3b34; --danger-bg:rgba(207,59,52,.09);
+  --info-bg:rgba(61,95,224,.09);
+  --track:#eceef3; --bar:rgba(244,245,248,.88); --hover:#d5dae4;
+  --shadow:0 1px 2px rgba(16,20,32,.06),0 8px 24px -14px rgba(16,20,32,.14);
+  --shadow-lg:0 8px 24px -12px rgba(16,20,32,.18);
+  --sans:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,"Cascadia Mono","SF Mono",Consolas,monospace;
+}
+[data-theme="dark"]{
+  --bg:#0c0e14; --panel:#14171f; --panel-2:#1a1e28; --raise:#202531;
+  --line:#262c3a; --line-soft:#1e232e;
+  --text:#e8ebf2; --muted:#a8b0c2; --faint:#6b7488;
+  --accent:#5b7cfa; --accent-ink:#fff; --accent-soft:rgba(91,124,250,.13);
+  --ok:#3ddc97; --ok-bg:rgba(61,220,151,.12);
+  --warn:#f5b544; --warn-bg:rgba(245,181,68,.12);
+  --danger:#f0655f; --danger-bg:rgba(240,101,95,.12);
+  --info-bg:rgba(91,124,250,.13);
+  --track:#262c3a; --bar:rgba(20,23,31,.88); --hover:#333b4d;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.5);
+  --shadow-lg:0 12px 32px -14px rgba(0,0,0,.6);
+  --sans:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,"Cascadia Mono","SF Mono",Consolas,monospace;
+}`
 
 // themeBootScript resolves the theme before the first paint.
 //
@@ -79,51 +96,56 @@ func accountsPageHTML() string {
 <title>WorkBuddy 账号</title>
 <style>
  *,*::before,*::after{box-sizing:border-box}` + themePalette + `
- body{margin:0;background:var(--bg);color:var(--text);
-   font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;
+ body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 var(--sans);
    -webkit-font-smoothing:antialiased}
+ ::selection{background:var(--accent-soft)}
  svg{display:block}
- .ico{width:15px;height:15px;stroke:currentColor;stroke-width:1.7;fill:none;
+ .ico{width:15px;height:15px;stroke:currentColor;stroke-width:1.6;fill:none;
    stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+ :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
 
  /* ── top bar ──────────────────────────────────────────────────────────── */
- header{position:sticky;top:0;z-index:6;display:flex;flex-wrap:wrap;gap:14px;
-   align-items:center;justify-content:space-between;padding:14px 22px;
+ header{position:sticky;top:0;z-index:6;display:flex;flex-wrap:wrap;gap:12px;
+   align-items:center;justify-content:space-between;padding:12px 22px;
    background:var(--bar);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
- .brand{display:flex;align-items:center;gap:12px;min-width:0}
- .logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#16a34a);
-   display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:15px;
-   letter-spacing:.5px;flex:0 0 auto}
- .brand h1{margin:0;font-size:15px;font-weight:650;letter-spacing:.2px}
- .brand p{margin:1px 0 0;font-size:12px;color:var(--muted)}
+ .brand{display:flex;align-items:center;gap:11px;min-width:0}
+ .logo{width:34px;height:34px;border-radius:9px;background:var(--accent);color:var(--accent-ink);
+   display:flex;align-items:center;justify-content:center;font-weight:650;font-size:14px;
+   letter-spacing:.4px;flex:0 0 auto}
+ .brand h1{margin:0;font-size:15px;font-weight:620;letter-spacing:-.01em}
+ .brand p{margin:1px 0 0;font-size:12px;color:var(--faint)}
  .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
- button{display:inline-flex;align-items:center;gap:6px;padding:8px 13px;border-radius:9px;
-   border:1px solid transparent;background:var(--accent);color:var(--accent-ink);font-size:13px;
-   font-weight:500;cursor:pointer;transition:filter .15s,border-color .15s;font-family:inherit}
- button:hover{filter:brightness(1.07)}
- button:disabled{background:var(--panel-2);color:var(--faint);border-color:var(--line);cursor:not-allowed;filter:none}
- button.ghost{background:var(--panel);color:var(--text);border-color:var(--line)}
- button.ghost:hover{filter:none;border-color:var(--hover);background:var(--panel-2)}
- button.icon{padding:8px;border-radius:9px;background:var(--panel);color:var(--muted);border-color:var(--line)}
- button.icon:hover{color:var(--text);border-color:var(--hover)}
- input[type=password],input[type=search],select{padding:8px 11px;border-radius:9px;
-   border:1px solid var(--line);background:var(--panel);color:var(--text);font-size:13px;
-   outline:none;font-family:inherit}
- input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(37,99,235,.14)}
+ button{display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border-radius:7px;
+   border:1px solid var(--line);background:var(--panel-2);color:var(--text);font:inherit;
+   font-size:13px;cursor:pointer;transition:border-color .12s,background .12s,filter .12s}
+ button:hover:not(:disabled){border-color:var(--accent)}
+ button:disabled{opacity:.5;cursor:default}
+ button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);
+   font-weight:550}
+ button.primary:hover:not(:disabled){filter:brightness(1.08);border-color:var(--accent)}
+ button.ghost{background:transparent}
+ button.icon{padding:7px 9px;color:var(--muted)}
+ button.icon:hover:not(:disabled){color:var(--text)}
+ input[type=password],input[type=search],select{padding:7px 11px;border-radius:7px;
+   border:1px solid var(--line);background:var(--panel-2);color:var(--text);font:inherit;
+   font-size:13px;outline:none}
+ input:focus,select:focus{border-color:var(--accent)}
  input[type=password]{width:190px} input[type=search]{width:100%}
  select{cursor:pointer}
 
  main{padding:20px 22px 44px;max-width:1240px;margin:0 auto}
 
- /* ── stat cards ───────────────────────────────────────────────────────── */
- .stats{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));margin-bottom:14px}
- .stat{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:14px 15px;
+ /* ── stat strip: the number is the subject, the label is a caption ─────── */
+ .stats{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));
+   margin-bottom:14px}
+ .stat{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 15px;
    box-shadow:var(--shadow)}
- .stat-top{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12.5px}
- .stat-num{font-size:25px;font-weight:650;letter-spacing:-.5px;margin:6px 0 2px;
-   font-variant-numeric:tabular-nums}
- .stat-sub{font-size:11.5px;color:var(--faint);line-height:1.35}
- .dot{width:22px;height:22px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+ .stat-top{display:flex;align-items:center;gap:8px;color:var(--faint);font-size:11.5px}
+ .stat-num{font:600 25px/1.15 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.02em;
+   margin:6px 0 3px;white-space:nowrap}
+ .stat-sub{font-size:11.5px;color:var(--faint);line-height:1.4}
+ .dot{width:22px;height:22px;border-radius:6px;display:flex;align-items:center;
+   justify-content:center;flex:0 0 auto}
  .dot .ico{width:13px;height:13px}
  .dot.ok{background:var(--ok-bg);color:var(--ok)}
  .dot.warn{background:var(--warn-bg);color:var(--warn)}
@@ -132,88 +154,98 @@ func accountsPageHTML() string {
  .dot.plain{background:var(--panel-2);color:var(--muted)}
 
  /* ── filters ──────────────────────────────────────────────────────────── */
- .filters{background:var(--panel);border:1px solid var(--line);border-radius:13px;
+ .filters{background:var(--panel);border:1px solid var(--line);border-radius:11px;
    padding:12px 14px;box-shadow:var(--shadow);margin-bottom:14px}
- .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
- .chip{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;
-   border:1px solid var(--line);background:var(--panel);color:var(--muted);font-size:12.5px;
-   cursor:pointer;user-select:none;transition:border-color .15s,color .15s,background .15s;white-space:nowrap}
- .chip:hover{border-color:var(--hover);color:var(--text)}
- .chip b{font-weight:650;color:var(--text)}
- .chip[aria-pressed=true]{background:var(--ok);border-color:var(--ok);color:#fff}
- .chip[aria-pressed=true] b{color:#fff}
+ .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+ .chip{display:inline-flex;align-items:center;gap:6px;padding:4px 11px;border-radius:999px;
+   border:1px solid var(--line);background:transparent;color:var(--faint);font-size:12.5px;
+   cursor:pointer;user-select:none;white-space:nowrap;
+   transition:background .12s,color .12s,border-color .12s}
+ .chip:hover{border-color:var(--accent);color:var(--text)}
+ .chip b{font-weight:550;color:var(--muted);font-variant-numeric:tabular-nums}
+ .chip[aria-pressed=true]{background:var(--accent-soft);border-color:transparent;
+   color:var(--accent);font-weight:550}
+ .chip[aria-pressed=true] b{color:var(--accent)}
  .filters-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
  .filters-row .grow{flex:1 1 260px;min-width:200px}
  .listhead{display:flex;align-items:center;justify-content:space-between;gap:12px;
-   flex-wrap:wrap;margin:0 2px 12px;color:var(--muted);font-size:12.5px}
+   flex-wrap:wrap;margin:0 2px 12px;color:var(--faint);font-size:12.5px}
  .listhead b{color:var(--text)}
 
  /* ── account cards ────────────────────────────────────────────────────── */
- .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fill,minmax(330px,1fr))}
+ .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(330px,1fr))}
  /* A state block is a page-level message, not a card: let it span the wall
     instead of sitting in the first column. */
  .grid>.state{grid-column:1/-1}
- .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+ .card{background:var(--panel);border:1px solid var(--line);border-radius:11px;
    box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden;
-   transition:border-color .15s,box-shadow .15s}
- .card:hover{border-color:var(--hover);box-shadow:var(--shadow-lg)}
- .card-head{display:flex;gap:12px;align-items:flex-start;padding:15px 16px 12px}
- .avatar{width:40px;height:40px;border-radius:12px;flex:0 0 auto;display:flex;align-items:center;
-   justify-content:center;color:#fff;font-weight:650;font-size:16px;letter-spacing:.5px}
+   transition:border-color .12s}
+ .card:hover{border-color:var(--hover)}
+ .card-head{display:flex;gap:11px;align-items:flex-start;padding:14px 15px 12px}
+ .avatar{width:38px;height:38px;border-radius:10px;flex:0 0 auto;display:flex;align-items:center;
+   justify-content:center;color:#fff;font-weight:650;font-size:15px;letter-spacing:.4px}
  .who{flex:1 1 auto;min-width:0}
- .who strong{display:block;font-size:14.5px;font-weight:650;line-height:1.3;
+ .who strong{display:block;font-size:14px;font-weight:600;line-height:1.3;
    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  .who span{display:block;font-size:11.5px;color:var(--faint);margin-top:2px;
    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
- .pill{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;
-   font-size:11.5px;font-weight:600;white-space:nowrap;flex:0 0 auto}
+ .pill{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;
+   font-size:11.5px;font-weight:550;white-space:nowrap;flex:0 0 auto}
  .pill i{width:6px;height:6px;border-radius:50%;background:currentColor;display:block}
  .pill.ok{background:var(--ok-bg);color:var(--ok)}
  .pill.warn{background:var(--warn-bg);color:var(--warn)}
  .pill.err{background:var(--danger-bg);color:var(--danger)}
- .pill.plain{background:var(--panel-2);color:var(--muted)}
+ .pill.plain{background:var(--panel-2);color:var(--muted);border:1px solid var(--line)}
 
-
- .quota{padding:13px 16px 4px}
- .quota h4{margin:0 0 10px;font-size:12px;font-weight:600;color:var(--muted);
+ .quota{padding:12px 15px 4px}
+ .quota h4{margin:0 0 10px;font-size:11.5px;font-weight:600;color:var(--faint);
    display:flex;align-items:center;justify-content:space-between;gap:8px}
  .quota h4 span{color:var(--faint);font-weight:400}
  .pkg{margin-bottom:13px}
  .pkg:last-child{margin-bottom:6px}
  .pkg-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
- .pkg-name{font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
- .pkg-pct{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;flex:0 0 auto}
+ .pkg-name{font-size:12.5px;font-weight:550;overflow:hidden;text-overflow:ellipsis;
+   white-space:nowrap}
+ .pkg-pct{font-size:12px;color:var(--faint);font-family:var(--mono);
+   font-variant-numeric:tabular-nums;flex:0 0 auto}
  .pkg-pct.warn{color:var(--warn);font-weight:600} .pkg-pct.err{color:var(--danger);font-weight:600}
- .bar{height:9px;border-radius:999px;background:var(--track);overflow:hidden}
+ .bar{height:6px;border-radius:999px;background:var(--track);overflow:hidden}
  .bar i{display:block;height:100%;border-radius:999px;transition:width .4s ease}
- .pkg-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:5px;
+ .pkg-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px;
    font-size:11.5px;color:var(--faint)}
  .pkg-foot .soon{color:var(--warn);font-weight:600}
 
- .quota-total{display:flex;align-items:baseline;gap:6px;font-size:12.5px;color:var(--muted);
+ .quota-total{display:flex;align-items:baseline;gap:6px;font-size:12.5px;color:var(--faint);
    margin-bottom:11px}
- .quota-total b{color:var(--text);font-weight:650;font-variant-numeric:tabular-nums}
- .foot-note{font-size:11.5px;color:var(--faint);white-space:nowrap}
- .card-foot{display:flex;align-items:center;gap:8px;padding:11px 16px;margin-top:auto;
-   border-top:1px solid var(--line);background:var(--panel-2)}
+ .quota-total b{color:var(--text);font-weight:650;font-family:var(--mono);
+   font-variant-numeric:tabular-nums}
+ .foot-note{font-size:11.5px;color:var(--faint);white-space:nowrap;overflow:hidden;
+   text-overflow:ellipsis}
+ .card-foot{display:flex;align-items:center;gap:8px;padding:10px 15px;margin-top:auto;
+   border-top:1px solid var(--line-soft);background:var(--panel-2)}
  .card-foot .spacer{flex:1 1 auto}
+
+ /* ── page-level state and notices ─────────────────────────────────────── */
  .state{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
-   border-radius:12px;padding:15px 17px;color:var(--muted);box-shadow:var(--shadow)}
+   border-radius:10px;padding:14px 16px;color:var(--muted);box-shadow:var(--shadow)}
  .state.err{border-left-color:var(--danger)}
  .state .title{color:var(--text);font-weight:600;margin-bottom:5px}
  .inline-state{border:none;border-radius:0;box-shadow:none;background:transparent;
-   padding:6px 0 14px;border-left:none;font-size:12.5px;color:var(--muted)}
+   padding:6px 0 14px;border-left:none;font-size:12.5px;color:var(--faint)}
  .inline-state.err{color:var(--danger)}
- .loading{display:flex;align-items:center;gap:9px;color:var(--muted);font-size:12.5px;padding:6px 0 14px}
+ .loading{display:flex;align-items:center;gap:9px;color:var(--faint);font-size:12.5px;
+   padding:6px 0 14px}
  .spinner{width:14px;height:14px;border-radius:50%;border:2px solid var(--track);
    border-top-color:var(--accent);animation:spin .8s linear infinite;flex:0 0 auto}
  @keyframes spin{to{transform:rotate(360deg)}}
- .toast{padding:10px 14px;border-radius:11px;background:var(--panel);border:1px solid var(--line);
-   border-left:3px solid var(--accent);color:var(--muted);box-shadow:var(--shadow);margin-bottom:14px}
+ .toast{padding:10px 14px;border-radius:9px;background:var(--raise);border:1px solid var(--line);
+   border-left:3px solid var(--faint);color:var(--muted);box-shadow:var(--shadow);
+   margin-bottom:14px;font-size:13px}
  .toast.ok{border-left-color:var(--ok)} .toast.err{border-left-color:var(--danger)}
- .foot{margin-top:26px;color:var(--faint);font-size:12px;text-align:center;line-height:1.85}
+ .foot{margin-top:26px;color:var(--faint);font-size:11.5px;text-align:center;line-height:1.9}
  .sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
    clip:rect(0 0 0 0);white-space:nowrap;border:0}
+ @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
  @media (max-width:640px){
    input[type=password]{width:130px}
  }
@@ -234,7 +266,7 @@ func accountsPageHTML() string {
     <input id="key" type="password" placeholder="管理密钥" autocomplete="off" spellcheck="false">
     <button id="checkin-all" class="ghost" type="button"><svg class="ico" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>全部签到</button>
     <button id="bonus-all" class="ghost" type="button"><svg class="ico" viewBox="0 0 24 24"><path d="M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5"/><path d="M16 12h.01"/></svg>国际奖励</button>
-    <button id="refresh" type="button"><svg class="ico" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>刷新</button>
+    <button id="refresh" class="primary" type="button"><svg class="ico" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>刷新</button>
   </div>
 </header>
 <main>

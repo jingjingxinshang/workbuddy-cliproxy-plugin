@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -667,5 +669,59 @@ func TestCheckinRouteRejectsNonPost(t *testing.T) {
 	resp = handleManagement(managementRequestWithMethod(http.MethodPost, "/v0/management/workbuddy/accounts"))
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("POST accounts status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
+	}
+}
+
+var (
+	cssCustomPropertyPattern = regexp.MustCompile(`(--[a-z0-9-]+)\s*:`)
+	cssVarUsePattern         = regexp.MustCompile(`var\((--[a-z0-9-]+)`)
+)
+
+// The page's stylesheet and its palette are two Go string literals, so a mistyped
+// token is not a syntax error anywhere: the browser drops the declaration and the
+// element silently renders with no colour. Nothing else in the suite can see it,
+// because the page still parses and still contains every substring.
+//
+// Both directions are asserted: every token a declaration asks for must exist,
+// and the scan must actually be finding tokens (a broken regexp would otherwise
+// make this test pass by finding nothing).
+func TestAccountsPageStylesReferenceDefinedTokens(t *testing.T) {
+	page := accountsPageHTML()
+
+	defined := map[string]bool{}
+	for _, match := range cssCustomPropertyPattern.FindAllStringSubmatch(page, -1) {
+		defined[match[1]] = true
+	}
+	referenced := map[string]bool{}
+	for _, match := range cssVarUsePattern.FindAllStringSubmatch(page, -1) {
+		referenced[match[1]] = true
+	}
+
+	if len(defined) < 20 {
+		t.Fatalf("found only %d custom properties; the palette is missing or the pattern is wrong", len(defined))
+	}
+	if len(referenced) < 15 {
+		t.Fatalf("found only %d var() uses; the stylesheet is missing or the pattern is wrong", len(referenced))
+	}
+
+	var missing []string
+	for token := range referenced {
+		if !defined[token] {
+			missing = append(missing, token)
+		}
+	}
+	sort.Strings(missing)
+	if len(missing) > 0 {
+		t.Fatalf("the page uses tokens nothing defines, so those declarations are dropped: %v", missing)
+	}
+
+	// Both palettes have to define the same set, or one theme renders with holes.
+	for _, token := range []string{"--bg", "--panel", "--panel-2", "--line", "--text", "--muted", "--faint", "--accent", "--ok", "--warn", "--danger", "--track"} {
+		if !defined[token] {
+			t.Errorf("token %s is not defined; a theme would render with holes", token)
+		}
+	}
+	if !strings.Contains(page, `[data-theme="dark"]`) {
+		t.Error("the dark palette is gone")
 	}
 }
