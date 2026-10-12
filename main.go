@@ -1014,6 +1014,19 @@ func fetchQuota(raw []byte) (pluginapi.QuotaFetchResponse, error) {
 		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("stored credential has no access_token")
 	}
 	profile := profiles[regionOf(auth)]
+	// An enterprise account has no personal resource packs: the personal endpoint
+	// answers with an empty account list, so asking it would show a permanent
+	// zero. Enterprise allocation is reported by its own endpoint instead.
+	if isEnterpriseAccount(auth) {
+		status, body, errCall := upstream("POST", profile.baseURL+"/v2/billing/meter/get-enterprise-user-usage", profile.origin, billingUserAgent, billingHeaders(auth), []byte("{}"), false)
+		if errCall != nil {
+			return pluginapi.QuotaFetchResponse{}, fmt.Errorf("enterprise usage request failed: %w", errCall)
+		}
+		if status >= 400 {
+			return pluginapi.QuotaFetchResponse{}, fmt.Errorf("enterprise usage endpoint returned HTTP %d: %s", status, truncate(string(body), 200))
+		}
+		return quotaFromEnterpriseUsage(body)
+	}
 	payload, errMarshal := json.Marshal(map[string]any{
 		"PageNumber":      1,
 		"PageSize":        200,
@@ -1083,6 +1096,92 @@ func quotaFromBilling(body []byte) (pluginapi.QuotaFetchResponse, error) {
 	}
 	plan := firstNonEmpty(accounts[0].PackageName, accounts[0].PackageCode)
 	resp.Subscription = &pluginapi.QuotaSubscription{Plan: plan, TierName: plan}
+	return resp, nil
+}
+
+// isEnterpriseAccount reports whether a credential belongs to an enterprise.
+//
+// Enterprise accounts have no personal growth system: the check-in endpoint
+// answers "not supported" and every growth endpoint answers 403, so the code
+// paths that assume a personal account have to ask first.
+func isEnterpriseAccount(auth workbuddyAuth) bool {
+	return strings.TrimSpace(auth.EnterpriseID) != ""
+}
+
+// enterpriseUsageEnvelope is the get-enterprise-user-usage payload.
+//
+// The numbers read backwards from the personal ones: `credit` is what has been
+// spent this cycle and `limitNum` is what the account was allocated, so the
+// remaining figure has to be derived rather than read. `limitNum` of -1 means the
+// account is not metered at all.
+//
+// They are pointers so an absent field stays distinguishable from a real zero: a
+// freshly allocated account legitimately reports credit 0.
+type enterpriseUsageEnvelope struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data struct {
+		Credit         *float64 `json:"credit"`
+		LimitNum       *float64 `json:"limitNum"`
+		CycleStartTime string   `json:"cycleStartTime"`
+		CycleEndTime   string   `json:"cycleEndTime"`
+		CycleResetTime string   `json:"cycleResetTime"`
+	} `json:"data"`
+}
+
+// quotaFromEnterpriseUsage maps the enterprise usage payload onto the host's
+// quota shape.
+func quotaFromEnterpriseUsage(body []byte) (pluginapi.QuotaFetchResponse, error) {
+	var env enterpriseUsageEnvelope
+	if errUnmarshal := json.Unmarshal(body, &env); errUnmarshal != nil {
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("enterprise usage response is not JSON: %s", truncate(string(body), 200))
+	}
+	if env.Code != 0 {
+		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("enterprise usage API error code=%d: %s", env.Code, truncate(env.Msg, 200))
+	}
+	used := capacityValue(env.Data.Credit)
+	reset := firstNonEmpty(env.Data.CycleResetTime, env.Data.CycleEndTime)
+	resp := pluginapi.QuotaFetchResponse{
+		Subscription: &pluginapi.QuotaSubscription{Plan: "企业额度", TierName: "企业版"},
+	}
+
+	// A non-positive allocation means the account is not metered. There is no
+	// total to take a percentage of, so only what has been spent is reported --
+	// reporting a total here would draw a bar against a number that does not
+	// exist.
+	if env.Data.LimitNum == nil || *env.Data.LimitNum <= 0 {
+		resp.Groups = []pluginapi.QuotaGroup{{
+			DisplayName: "企业额度（不限量）",
+			Buckets: []pluginapi.QuotaBucket{{
+				ResetTime:         reset,
+				RemainingFraction: 1,
+				Description:       fmt.Sprintf("本周期已用 %.2f", used),
+			}},
+		}}
+		resp.Summary = []pluginapi.QuotaMetric{
+			{Key: "used", Label: "本周期已用", Value: used, Format: "number", Unit: "credits"},
+		}
+		return resp, nil
+	}
+
+	limit := *env.Data.LimitNum
+	remain := limit - used
+	if remain < 0 {
+		remain = 0
+	}
+	resp.Groups = []pluginapi.QuotaGroup{{
+		DisplayName: "企业额度",
+		Buckets: []pluginapi.QuotaBucket{{
+			ResetTime:         reset,
+			RemainingFraction: remain / limit,
+			Description:       fmt.Sprintf("%.0f / %.0f", remain, limit),
+		}},
+	}}
+	resp.Summary = []pluginapi.QuotaMetric{
+		{Key: "remain", Label: "剩余额度", Value: remain, Format: "number", Unit: "credits"},
+		{Key: "total", Label: "总额度", Value: limit, Format: "number", Unit: "credits"},
+		{Key: "used_percent", Label: "已用比例", Value: (1 - remain/limit) * 100, Format: "number", Unit: "%"},
+	}
 	return resp, nil
 }
 

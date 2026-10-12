@@ -11,7 +11,7 @@
 - `/v3/config` 模型发现
 - `/v2/chat/completions` 普通和 SSE 请求
 - WorkBuddy 所需的 Origin、Referer、User-Agent、账号身份请求头
-- QuotaProvider：`/billing/meter/get-user-resource` 额度查询
+- QuotaProvider：`/billing/meter/get-user-resource` 额度查询（企业号走 `get-enterprise-user-usage`）
 - 面板内账号页：多账号列表（昵称 / UID / 企业 / 区域 / 套餐 / 额度 / 凭据到期 / 签到状态）
 - 每日签到：`/billing/meter/checkin-status` + `/billing/meter/daily-checkin`，**仅手动触发**（账号页按钮或管理接口），插件不会自动领取
 - 区域自动识别：`region` 字段缺失时按凭据自身的 `domain` 判定（`workbuddy.ai` / `codebuddy.ai` → 国际）
@@ -200,6 +200,24 @@ POST /v0/management/workbuddy/checkin[?auth_index=|?name=]   签到（不带参�
 **国际账号的卡片按钮是「领取奖励」而不是「签到」**：国际账号根本没有每日签到（那个动作是桌面应用的 deep link），它的每日收入是 growth 上报，所以给一个只可能回答 `unknown` 的按钮是误导。「已点亮」后按钮变灰，徽标取自最近一次运行结果（页面载入时从 `dailybonus/status` 读一次）。
 
 账号页存在的必要性：面板只为六个内置 provider 渲染额度（`QuotaProviderType` 是封闭联合类型），插件 provider 在面板里既没有额度位置也没有账号视图，因此插件用自己的资源页展示账号、额度与签到。
+
+### 企业版账号（自动识别，无需配置）
+
+凭据带非空 `enterprise_id` 即为**企业版账号**。上游对企业号**不提供个人成长体系**（实测口径）：
+
+| 接口 | 企业号结果 |
+|---|---|
+| `POST /v2/billing/meter/daily-checkin`（签到） | HTTP 400 `code 10001`「企业账号不支持该操作」 |
+| `GET /activity/growth/*`（连登 / 热力图 / 任务） | HTTP 403「growth system is only available for personal users」 |
+| `POST /v2/billing/meter/get-user-resource`（个人额度） | 恒返回空 `Accounts` —— 直接展示会永久显示 0 |
+
+所以插件对企业号：
+
+- **额度改走 `POST /v2/billing/meter/get-enterprise-user-usage`**（`X-Enterprise-Id` 已随请求头带上）。该接口口径与个人**相反**：`credit` 是**本周期已用**，`limitNum` 是**分配给本账号的额度**，插件据此换算 `剩余 = limitNum - credit`；`limitNum = -1` 为**不限量**（只报「本周期已用」，不画进度条——没有总量却画百分比是假的）。企业配额按周期重置，重置时间取 `cycleResetTime`。
+- **国际每日奖励跳过它**，并在日志/状态里标为 `skipped` 而不是 `failed`：growth 接口对企业号恒 403，不跳过只会在每个时段刷出无意义的失败行。
+- **账号页不渲染「签到」/「领取奖励」按钮**，改为一行说明 —— 给一个点了必然失败的按钮比不给更糟。
+
+企业号照常可用：模型列表、对话执行、token 刷新（不刷新同样会过期）。
 
 ## 每日签到
 

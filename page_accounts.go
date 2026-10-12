@@ -562,13 +562,23 @@ function accountCard(account) {
   var international = account.region === 'intl';
   var bonus = international ? state.bonus[key] : null;
   var earned = bonus && (bonus.status === 'reported' || bonus.status === 'already-lit');
-  var action = international
-    ? '<button class="' + (earned ? 'ghost' : '') + '" type="button" data-bonus="' + esc(key) + '">' +
-        svg('wallet') + (earned ? '今日已点亮' : '领取奖励') + '</button>'
-    : '<button class="' + (view.done ? 'ghost' : '') + '" type="button" data-checkin="' + esc(key) + '"' +
-        (view.done ? ' disabled' : '') + '>' + svg('check') + (view.done ? '已签到' : '签到') + '</button>';
+  // An enterprise account has no personal growth system: check-in answers "not
+  // supported" and every growth endpoint answers 403. Offering either button
+  // would be offering a click that cannot work, so the card says so instead.
+  var enterprise = !!account.enterprise_id;
+  var action = '';
+  if (enterprise) {
+    action = '';
+  } else if (international) {
+    action = '<button class="' + (earned ? 'ghost' : '') + '" type="button" data-bonus="' + esc(key) + '">' +
+      svg('wallet') + (earned ? '今日已点亮' : '领取奖励') + '</button>';
+  } else {
+    action = '<button class="' + (view.done ? 'ghost' : '') + '" type="button" data-checkin="' + esc(key) + '"' +
+      (view.done ? ' disabled' : '') + '>' + svg('check') + (view.done ? '已签到' : '签到') + '</button>';
+  }
   var bonusNote = '';
-  if (bonus && bonus.status === 'failed') bonusNote = '国际奖励：' + (bonus.detail || '失败');
+  if (enterprise) bonusNote = '企业版账号：额度按周期重置，无个人每日任务';
+  else if (bonus && bonus.status === 'failed') bonusNote = '国际奖励：' + (bonus.detail || '失败');
   else if (bonus && bonus.status === 'already-lit' && bonus.day) bonusNote = '国际奖励：' + bonus.day + ' 已点亮';
   // The expiry is the one fact worth a line under the name: a credential that
   // stops refreshing shows up here before it shows up as a failed request. It

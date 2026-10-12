@@ -252,6 +252,14 @@ func runDailyBonusOne(authIndex string, row dailyBonusRow) dailyBonusRow {
 		row.Detail = "credential has no access token"
 		return row
 	}
+	// An enterprise account has no personal growth system: every growth endpoint
+	// answers 403 for it, so reporting would only produce a failed row on every
+	// tick for an account that can never succeed at this.
+	if isEnterpriseAccount(auth) {
+		row.Status = "skipped"
+		row.Detail = "企业版账号没有个人成长体系"
+		return row
+	}
 
 	today, lit, errToday := fetchGrowthToday(auth)
 	if errToday != nil {

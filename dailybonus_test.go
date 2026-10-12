@@ -153,6 +153,36 @@ func TestDailyBonusNeverRetriesTheReport(t *testing.T) {
 	}
 }
 
+// An enterprise account has no personal growth system: every growth endpoint
+// answers 403 for it, so reporting would produce a failed row on every tick for
+// an account that can never succeed at this.
+func TestDailyBonusSkipsEnterpriseAccounts(t *testing.T) {
+	server, calls, reports := growthStub(t, 0, http.StatusOK)
+	stubIntlRegion(t, server.URL)
+	stubCredential(t, workbuddyAuth{AccessToken: "t", Region: intlRegion, Domain: "www.workbuddy.ai", EnterpriseID: "ent-1"})
+
+	row := runDailyBonusOne("auth-1", dailyBonusRow{AuthIndex: "auth-1"})
+
+	if row.Status != "skipped" {
+		t.Fatalf("status = %q, want skipped", row.Status)
+	}
+	if len(*calls) != 0 || len(*reports) != 0 {
+		t.Fatalf("an enterprise account produced growth traffic: calls=%v reports=%d", *calls, len(*reports))
+	}
+}
+
+func TestIsEnterpriseAccount(t *testing.T) {
+	if isEnterpriseAccount(workbuddyAuth{}) {
+		t.Fatal("a credential with no enterprise id is not an enterprise account")
+	}
+	if isEnterpriseAccount(workbuddyAuth{EnterpriseID: "   "}) {
+		t.Fatal("a blank enterprise id must not count as an enterprise account")
+	}
+	if !isEnterpriseAccount(workbuddyAuth{EnterpriseID: "ent-1"}) {
+		t.Fatal("an enterprise id must be recognised")
+	}
+}
+
 func TestDailyBonusScheduleWindow(t *testing.T) {
 	cases := []struct {
 		hour int
