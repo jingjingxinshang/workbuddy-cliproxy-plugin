@@ -66,7 +66,7 @@ const (
 	// Credential files and their type field still carry it, so it stays readable.
 	legacyIdentity = "workbuddy"
 	pluginName     = "WorkBuddy"
-	pluginVer      = "0.4.0"
+	pluginVer      = "0.4.1"
 	// pluginAuthor and pluginLogoURL are the same values the store registry
 	// carries, so the panel card and the store entry describe one plugin rather
 	// than two.
@@ -452,7 +452,7 @@ func configuredRegion() string {
 
 // loginRegion resolves the cluster for one login. An explicit region wins over
 // the configured default, because the host maps every query parameter of
-// /v0/management/workbuddy-auth-url into the login metadata — that keeps
+// /v0/management/<providerID>-auth-url into the login metadata — that keeps
 // `?region=intl` working for an operator who usually signs in to the other
 // cluster.
 func loginRegion(metadata map[string]any) string {
@@ -1348,8 +1348,8 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 	// The host forwards both path spaces to this one handler with the full
 	// request path:
 	//
-	//	/v0/resource/plugins/workbuddy/quota   the page, which the panel loads in an iframe
-	//	/v0/management/workbuddy/quota         the route that page's script calls
+	//	/v0/resource/plugins/<providerID>/quota   the page, which the panel loads in an iframe
+	//	/v0/management/<providerID>/quota         the route that page's script calls
 	//
 	// They overlap by suffix -- the resource path also ends in "/<providerID>/quota"
 	// — so matching the route first answered the iframe navigation with the
@@ -1411,7 +1411,7 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 				"start":  "/v0/management/" + providerID + "-auth-url",
 				"status": "/v0/management/get-auth-status",
 			},
-			"quota": "/v0/management/workbuddy/quota",
+			"quota": "/v0/management/" + providerID + "/quota",
 		})
 		if errMarshal != nil {
 			body = []byte(`{"provider":"` + providerID + `"}`)
@@ -1510,7 +1510,7 @@ func resolveAuthIndex(raw []byte) (string, error) {
 	return "", fmt.Errorf("no WorkBuddy credential found (provider=%s)", providerID)
 }
 
-// quotaRouteResponse answers GET /v0/management/workbuddy/quota[?auth_index=...]
+// quotaRouteResponse answers GET /v0/management/<providerID>/quota[?auth_index=...]
 func quotaRouteResponse(raw []byte) pluginapi.ManagementResponse {
 	authIndex, errResolve := resolveAuthIndex(raw)
 	if errResolve != nil {

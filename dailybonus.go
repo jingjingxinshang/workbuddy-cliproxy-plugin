@@ -379,7 +379,7 @@ func dailyBonusLoop() {
 
 func init() { go dailyBonusLoop() }
 
-// dailyBonusRouteResponse answers POST /v0/management/workbuddy/dailybonus.
+// dailyBonusRouteResponse answers POST /v0/management/<providerID>/dailybonus.
 //
 // A manual run ignores the scheduled toggle, the same way the check-in button
 // does: the toggle gates unattended runs, not an operator asking for one.
@@ -398,7 +398,7 @@ func dailyBonusRouteResponse(raw []byte) pluginapi.ManagementResponse {
 	return jsonManagementResponse(body)
 }
 
-// dailyBonusStatusResponse answers GET /v0/management/workbuddy/dailybonus/status.
+// dailyBonusStatusResponse answers GET /v0/management/<providerID>/dailybonus/status.
 //
 // The last run is kept in memory only: it is diagnostic, and a restart is
 // expected to start with no run recorded rather than with a stale one.

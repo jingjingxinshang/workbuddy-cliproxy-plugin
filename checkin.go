@@ -253,7 +253,7 @@ func credentialJSONForAuthIndex(authIndex string) []byte {
 	return payload.JSON
 }
 
-// accountsView answers GET /v0/management/workbuddy/accounts.
+// accountsView answers GET /v0/management/<providerID>/accounts.
 //
 // CPA's panel renders quota for its built-in providers only, so this page is
 // the one place an operator sees every WorkBuddy account at once: the identity
@@ -336,7 +336,7 @@ type checkinOutcome struct {
 	checkinResult
 }
 
-// checkinRouteResponse answers POST /v0/management/workbuddy/checkin.
+// checkinRouteResponse answers POST /v0/management/<providerID>/checkin.
 //
 // Passing no auth_index claims for every WorkBuddy credential, which is what the
 // page's manual sweep and its automatic one both use.

@@ -539,6 +539,19 @@ func TestAccountsPageCarriesNoGoSpelling(t *testing.T) {
 	}
 }
 
+// authParseRequestFor builds an auth.parse payload for one credential file.
+func authParseRequestFor(raw []byte, fileName string) []byte {
+	payload, errMarshal := json.Marshal(pluginapi.AuthParseRequest{
+		Provider: fileName[:strings.Index(fileName, "-")],
+		FileName: fileName,
+		RawJSON:  raw,
+	})
+	if errMarshal != nil {
+		panic(errMarshal)
+	}
+	return payload
+}
+
 // lifecycleBody builds a plugin.register / plugin.reconfigure payload. The host
 // serializes the config bytes as base64 inside JSON.
 func lifecycleBody(t *testing.T, configYAML string) []byte {
@@ -812,5 +825,65 @@ func TestManagementResponsesForbidCaching(t *testing.T) {
 	first.Headers.Set("Content-Type", "text/plain")
 	if second := htmlManagementResponse("<p>b</p>"); second.Headers.Get("Content-Type") != "text/html; charset=utf-8" {
 		t.Fatal("the shared header map is being mutated between responses")
+	}
+}
+
+// Nothing the plugin serves may still name the previous identity.
+//
+// The plugin was renamed from "workbuddy" to workbuddy-jjxs, and the rename had
+// to touch a dozen places that are all just strings: route declarations, the
+// paths the page fetches, the paths the plugin advertises to callers, and the
+// route prefix the dispatcher matches on. Two of them were missed on the first
+// pass -- one of them a live path in the status payload -- because the sweep only
+// looked for the shapes I happened to think of. This walks everything the plugin
+// can emit and refuses the old identity as a path segment.
+func TestNoStaleIdentityInServedPaths(t *testing.T) {
+	// The page is served as HTML and fetches its own routes.
+	page := accountsPageHTML()
+	if strings.Contains(page, "/workbuddy/") {
+		t.Error("the page still calls a route under the previous identity")
+	}
+
+	// Registration: resource routes, management routes and the advertised paths.
+	raw, errHandle := handleMethod(pluginabi.MethodManagementRegister, nil)
+	if errHandle != nil {
+		t.Fatalf("management.register: %v", errHandle)
+	}
+	if strings.Contains(string(raw), "/workbuddy/") {
+		t.Errorf("management registration still declares the previous identity: %s", truncate(string(raw), 200))
+	}
+
+	// The status payload names the quota route for a caller.
+	status := handleManagement(managementRequestFor("/v0/management/" + providerID + "/status"))
+	if strings.Contains(string(status.Body), "/workbuddy/") {
+		t.Errorf("the status payload still points at the previous identity: %s", truncate(string(status.Body), 200))
+	}
+	// ...and it has to name the right one.
+	if !strings.Contains(string(status.Body), "/v0/management/"+providerID+"/quota") {
+		t.Errorf("the status payload does not name the quota route: %s", truncate(string(status.Body), 200))
+	}
+}
+
+// The identity is also what the plugin tells the host it is, so it has to be the
+// same string everywhere it appears.
+func TestIdentityIsConsistent(t *testing.T) {
+	if providerID == legacyIdentity {
+		t.Fatalf("providerID (%q) still equals the legacy identity", providerID)
+	}
+	if !strings.Contains(providerID, legacyIdentity) {
+		t.Fatalf("providerID %q should still contain %q so the credential claim keeps matching", providerID, legacyIdentity)
+	}
+
+	// The credential files this plugin writes are named after the identity.
+	fileName := credentialFileName(workbuddyAuth{UID: "abc123"})
+	if !strings.HasPrefix(fileName, providerID+"-") {
+		t.Fatalf("credential file %q is not named after the identity %q", fileName, providerID)
+	}
+
+	// ...and a credential written under the old identity is still claimed.
+	legacy := []byte(`{"type":"` + legacyIdentity + `","access_token":"t","refresh_token":"r"}`)
+	resp := parseAuth(authParseRequestFor(legacy, legacyIdentity+"-0851ce35.json"))
+	if !resp.Handled {
+		t.Fatal("a credential written before the rename is no longer claimed, which orphans it")
 	}
 }
