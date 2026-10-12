@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -725,3 +726,50 @@ func TestAccountsPageStylesReferenceDefinedTokens(t *testing.T) {
 		t.Error("the dark palette is gone")
 	}
 }
+
+// The plugin reports its version twice: once in its registration metadata, which
+// is what the panel shows next to the plugin, and once in the store registry,
+// which is what decides whether an update is offered. They are edited by
+// different hands and nothing else compares them.
+//
+// They drifted. A gofmt re-alignment changed the spacing of the pluginVer
+// declaration, the release script kept looking for the old spacing, and its
+// string replacement quietly did nothing -- so four releases were published that
+// all reported the previous version. The panel showed the old number while the
+// store offered the new one, and the only way to notice was to read a built
+// binary.
+func TestPluginVersionMatchesTheStoreRegistry(t *testing.T) {
+	raw, errRead := os.ReadFile("registry.json")
+	if errRead != nil {
+		t.Fatalf("read registry.json: %v", errRead)
+	}
+	var registry struct {
+		Plugins []struct {
+			ID         string `json:"id"`
+			Version    string `json:"version"`
+			ReleaseTag string `json:"release_tag"`
+		} `json:"plugins"`
+	}
+	if errUnmarshal := json.Unmarshal(raw, &registry); errUnmarshal != nil {
+		t.Fatalf("registry.json is not readable: %v", errUnmarshal)
+	}
+	if len(registry.Plugins) == 0 {
+		t.Fatal("registry.json declares no plugins")
+	}
+
+	entry := registry.Plugins[0]
+	if entry.Version != pluginVer {
+		t.Fatalf("version drift: the plugin reports %q but the store registry offers %q; a release here would be published under a version the binary does not report", pluginVer, entry.Version)
+	}
+	if entry.ReleaseTag != pluginVer {
+		t.Fatalf("release tag drift: tag %q, plugin reports %q", entry.ReleaseTag, pluginVer)
+	}
+	if entry.ID != providerID {
+		t.Fatalf("registry id %q does not match the provider id %q", entry.ID, providerID)
+	}
+	if !semverPattern.MatchString(pluginVer) {
+		t.Fatalf("plugin version %q is not a plain semantic version", pluginVer)
+	}
+}
+
+var semverPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)

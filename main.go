@@ -62,7 +62,7 @@ import (
 const (
 	providerID = "workbuddy"
 	pluginName = "WorkBuddy"
-	pluginVer  = "0.3.18"
+	pluginVer  = "0.3.23"
 	// pluginAuthor and pluginLogoURL are the same values the store registry
 	// carries, so the panel card and the store entry describe one plugin rather
 	// than two.
