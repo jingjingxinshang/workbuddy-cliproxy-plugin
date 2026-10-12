@@ -13,6 +13,11 @@ package main
 // attempt. A rate-limited account answers immediately, so retrying costs almost
 // nothing, but a hanging attempt must not be able to multiply the request's
 // worst case by the number of accounts.
+//
+// Not every rate limit is account-wide. CodeBuddy answers code 6004, with a
+// "will reset at ..." wall clock, for one model while the account stays usable
+// for every other model -- so that window is recorded against the model, and a
+// request for a different model still finds the account healthy.
 
 import (
 	"encoding/json"
@@ -38,6 +43,9 @@ const (
 type authCooldown struct {
 	NextRetryAt time.Time
 	Reason      string
+	// Model is the model this window applies to. Empty means the whole account:
+	// a limit that names no model is throttling everything the account sends.
+	Model string
 }
 
 var (
@@ -45,9 +53,15 @@ var (
 	cooldowns  = map[string]authCooldown{}
 )
 
-// markAuthCooldown records that one account reached a rate limit. A zero or
-// already-past reset time falls back to the default window.
-func markAuthCooldown(authIndex string, resetAt time.Time) {
+// cooldownKey scopes one window to an account, optionally to a single model.
+func cooldownKey(authIndex, model string) string {
+	return strings.TrimSpace(authIndex) + "\x00" + strings.ToLower(strings.TrimSpace(model))
+}
+
+// markAuthCooldownForModel records that one account reached a rate limit, scoped
+// to one model when the upstream named one. A zero or already-past reset time
+// falls back to the default window.
+func markAuthCooldownForModel(authIndex, model string, resetAt time.Time) {
 	authIndex = strings.TrimSpace(authIndex)
 	if authIndex == "" {
 		return
@@ -55,39 +69,55 @@ func markAuthCooldown(authIndex string, resetAt time.Time) {
 	if resetAt.IsZero() || !resetAt.After(time.Now()) {
 		resetAt = time.Now().Add(defaultCooldown)
 	}
+	model = strings.ToLower(strings.TrimSpace(model))
 	cooldownMu.Lock()
-	cooldowns[authIndex] = authCooldown{NextRetryAt: resetAt, Reason: "429"}
+	cooldowns[cooldownKey(authIndex, model)] = authCooldown{NextRetryAt: resetAt, Reason: "429", Model: model}
 	cooldownMu.Unlock()
 }
 
-// authOnCooldown reports whether an account is still inside its window. An
-// expired entry is dropped on read.
-func authOnCooldown(authIndex string) bool {
+// authOnCooldown reports whether one account is inside a window that applies to
+// this request: either the whole account, or the model it asks for.
+func authOnCooldown(authIndex, model string) bool {
 	authIndex = strings.TrimSpace(authIndex)
 	if authIndex == "" {
 		return false
 	}
+	model = strings.ToLower(strings.TrimSpace(model))
 	cooldownMu.Lock()
 	defer cooldownMu.Unlock()
-	entry, present := cooldowns[authIndex]
+	// The whole-account window first: it covers every model.
+	return cooldownActiveLocked(authIndex, "") || cooldownActiveLocked(authIndex, model)
+}
+
+// cooldownActiveLocked reports whether one keyed window is still live, dropping
+// it when it has expired. The caller holds the mutex.
+func cooldownActiveLocked(authIndex, model string) bool {
+	key := cooldownKey(authIndex, model)
+	entry, present := cooldowns[key]
 	if !present {
 		return false
 	}
 	if time.Now().Before(entry.NextRetryAt) {
 		return true
 	}
-	delete(cooldowns, authIndex)
+	delete(cooldowns, key)
 	return false
 }
 
-// clearAuthCooldown forgets an account's window after it answers normally.
+// clearAuthCooldown forgets every window for one account after it answers
+// normally, model-scoped ones included.
 func clearAuthCooldown(authIndex string) {
 	authIndex = strings.TrimSpace(authIndex)
 	if authIndex == "" {
 		return
 	}
+	prefix := authIndex + "\x00"
 	cooldownMu.Lock()
-	delete(cooldowns, authIndex)
+	for key := range cooldowns {
+		if strings.HasPrefix(key, prefix) {
+			delete(cooldowns, key)
+		}
+	}
 	cooldownMu.Unlock()
 }
 
@@ -181,6 +211,17 @@ func isRateLimitResponse(status int, body string) bool {
 		strings.Contains(lower, "too many requests")
 }
 
+// code6004Marker is the upstream business code for a per-model usage limit:
+// "usage exceeds frequency limit" for one model, with a reset wall clock. The
+// account itself stays usable for other models.
+const code6004Marker = "6004"
+
+// isModelScopedRateLimit reports whether a rate limit applies to one model
+// rather than to the account as a whole.
+func isModelScopedRateLimit(body string) bool {
+	return strings.Contains(body, code6004Marker)
+}
+
 // errEmptyStream marks an upstream that answered 2xx and produced nothing. It is
 // an upstream or request problem, never an account problem, so the failover loop
 // stops: replaying it elsewhere would bill a second account for the same failed
@@ -201,12 +242,12 @@ var (
 
 // chatCandidates lists the accounts one request may be retried on: the routed
 // account first, then every other enabled WorkBuddy credential that is not on
-// cooldown.
+// cooldown for this model.
 //
 // When the host credential list is unavailable there is nothing to fail over to,
 // and trying only the routed account is the honest answer rather than inventing
 // a retry.
-func chatCandidates(routedAuthIndex string, routedAuth workbuddyAuth) []failoverCandidate {
+func chatCandidates(routedAuthIndex string, routedAuth workbuddyAuth, model string) []failoverCandidate {
 	candidates := []failoverCandidate{{AuthIndex: strings.TrimSpace(routedAuthIndex), Auth: routedAuth}}
 	entries, errList := authListSource()
 	if errList != nil {
@@ -220,7 +261,7 @@ func chatCandidates(routedAuthIndex string, routedAuth workbuddyAuth) []failover
 		if entry.Disabled || strings.EqualFold(strings.TrimSpace(entry.Status), "disabled") {
 			continue
 		}
-		if authOnCooldown(index) {
+		if authOnCooldown(index, model) {
 			continue
 		}
 		credential := authCredentialSource(index)
@@ -249,13 +290,13 @@ func chatAttempt(auth workbuddyAuth, payload []byte, stream bool, budget time.Du
 // A failure that is not a rate limit stops the loop immediately: a transport
 // error or a rejected request is not the account's fault, and replaying it
 // elsewhere only risks a second charge.
-func executeChat(routedAuthIndex string, routedAuth workbuddyAuth, payload []byte, stream bool) (int, []byte, error) {
+func executeChat(routedAuthIndex string, routedAuth workbuddyAuth, model string, payload []byte, stream bool) (int, []byte, error) {
 	deadline := time.Now().Add(chatTimeout)
 	lastStatus, lastBody := 0, []byte(nil)
 	lastErr := error(nil)
 	routedIndex := strings.TrimSpace(routedAuthIndex)
 	attempted := false
-	for _, candidate := range chatCandidates(routedIndex, routedAuth) {
+	for _, candidate := range chatCandidates(routedIndex, routedAuth, model) {
 		budget := time.Until(deadline)
 		if budget <= 0 {
 			break
@@ -273,11 +314,23 @@ func executeChat(routedAuthIndex string, routedAuth workbuddyAuth, payload []byt
 		if !isRateLimitResponse(status, string(body)) {
 			return status, body, errCall
 		}
-		markAuthCooldown(candidate.AuthIndex, parseRateLimitReset(string(body)))
+		// 6004 is a model-level limit, so only that model is parked; the account
+		// still serves every other model. Anything else that reads as a rate limit
+		// parks the account.
+		reset := parseRateLimitReset(string(body))
+		if isModelScopedRateLimit(string(body)) {
+			markAuthCooldownForModel(candidate.AuthIndex, model, reset)
+		} else {
+			markAuthCooldownForModel(candidate.AuthIndex, "", reset)
+		}
 		if candidate.AuthIndex == routedIndex {
 			// The routed account is the first candidate, so everything after it is
 			// a fallback. Saying so keeps the log honest about what happened.
-			warn("account %s is rate limited; retrying the request on another account", candidate.AuthIndex)
+			if isModelScopedRateLimit(string(body)) {
+				warn("account %s is rate limited for model %s; retrying the request on another account", candidate.AuthIndex, model)
+			} else {
+				warn("account %s is rate limited; retrying the request on another account", candidate.AuthIndex)
+			}
 		}
 	}
 	if lastErr != nil {

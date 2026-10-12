@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// testModel is the model every failover test asks for. The loop scopes a 6004
+// cooldown to it, so the tests have to be explicit about which model they want.
+const testModel = "deepseek-v4-flash"
+
 // emptySuccessStatus makes the stub answer 2xx with no body at all.
 const emptySuccessStatus = http.StatusNoContent
 
@@ -48,6 +52,13 @@ func stubAccounts(t *testing.T, entries []hostAuthFileEntry, accounts map[string
 // order.
 func chatStub(t *testing.T, byToken map[string]int) (*httptest.Server, *[]string) {
 	t.Helper()
+	return chatStubWithBody(t, byToken, rateLimitBody)
+}
+
+// chatStubWithBody is chatStub with the failure body left to the caller, so a
+// test can pick between a model-scoped 6004 and a plain account-wide limit.
+func chatStubWithBody(t *testing.T, byToken map[string]int, failureBody string) (*httptest.Server, *[]string) {
+	t.Helper()
 	seen := &[]string{}
 	var mu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +77,7 @@ func chatStub(t *testing.T, byToken map[string]int) (*httptest.Server, *[]string
 		case status == emptySuccessStatus:
 			// 2xx with no payload.
 		case status == http.StatusTooManyRequests || status == http.StatusBadRequest:
-			_, _ = w.Write([]byte(rateLimitBody))
+			_, _ = w.Write([]byte(failureBody))
 		case status >= 400:
 			// A neutral failure: only the wording decides a rate limit, so a plain
 			// 5xx must not carry it.
@@ -98,7 +109,7 @@ func TestFailoverRetriesARateLimitedAccountOnAnother(t *testing.T) {
 	stubAccounts(t, entries, accounts)
 
 	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
-	status, body, errCall := executeChat("auth-1", routed, []byte(`{"messages":[]}`), false)
+	status, body, errCall := executeChat("auth-1", routed, testModel, []byte(`{"messages":[]}`), false)
 
 	if errCall != nil {
 		t.Fatalf("executeChat returned %v, want a fallback success", errCall)
@@ -109,10 +120,10 @@ func TestFailoverRetriesARateLimitedAccountOnAnother(t *testing.T) {
 	if len(*seen) != 2 || (*seen)[0] != "t1" || (*seen)[1] != "t2" {
 		t.Fatalf("attempts = %v, want the routed account then the fallback", *seen)
 	}
-	if !authOnCooldown("auth-1") {
+	if !authOnCooldown("auth-1", testModel) {
 		t.Fatal("the rate-limited account was not parked, so the next request repeats the 429")
 	}
-	if authOnCooldown("auth-2") {
+	if authOnCooldown("auth-2", testModel) {
 		t.Fatal("the account that answered was left on cooldown")
 	}
 }
@@ -127,7 +138,7 @@ func TestFailoverDoesNotRetryAHardCreditError(t *testing.T) {
 	stubAccounts(t, entries, accounts)
 
 	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
-	status, _, errCall := executeChat("auth-1", routed, []byte(`{}`), false)
+	status, _, errCall := executeChat("auth-1", routed, testModel, []byte(`{}`), false)
 
 	if errCall != nil {
 		t.Fatalf("executeChat returned %v, want the upstream status passed through", errCall)
@@ -138,7 +149,7 @@ func TestFailoverDoesNotRetryAHardCreditError(t *testing.T) {
 	if len(*seen) != 1 {
 		t.Fatalf("attempts = %v, want exactly one: a credit error is not the account's fault to route around", *seen)
 	}
-	if authOnCooldown("auth-1") {
+	if authOnCooldown("auth-1", testModel) {
 		t.Fatal("an out-of-credits account was parked as if it were throttled")
 	}
 }
@@ -153,7 +164,7 @@ func TestFailoverDoesNotRetryANonRateLimitFailure(t *testing.T) {
 	stubAccounts(t, entries, accounts)
 
 	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
-	status, _, errCall := executeChat("auth-1", routed, []byte(`{}`), false)
+	status, _, errCall := executeChat("auth-1", routed, testModel, []byte(`{}`), false)
 
 	if errCall != nil {
 		t.Fatalf("executeChat returned %v", errCall)
@@ -176,7 +187,7 @@ func TestFailoverDoesNotRetryAnEmptySuccess(t *testing.T) {
 	stubAccounts(t, entries, accounts)
 
 	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
-	_, _, errCall := executeChat("auth-1", routed, []byte(`{}`), false)
+	_, _, errCall := executeChat("auth-1", routed, testModel, []byte(`{}`), false)
 
 	if errCall == nil {
 		t.Fatal("an empty 2xx was accepted as a result")
@@ -196,7 +207,7 @@ func TestFailoverParksEveryThrottledAccount(t *testing.T) {
 	stubAccounts(t, entries, accounts)
 
 	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
-	_, _, errCall := executeChat("auth-1", routed, []byte(`{}`), false)
+	_, _, errCall := executeChat("auth-1", routed, testModel, []byte(`{}`), false)
 
 	if errCall == nil {
 		t.Fatal("expected a failure when every account is rate limited")
@@ -204,7 +215,7 @@ func TestFailoverParksEveryThrottledAccount(t *testing.T) {
 	if len(*seen) != 2 {
 		t.Fatalf("attempts = %v, want both accounts tried", *seen)
 	}
-	if !authOnCooldown("auth-1") || !authOnCooldown("auth-2") {
+	if !authOnCooldown("auth-1", testModel) || !authOnCooldown("auth-2", testModel) {
 		t.Fatal("a throttled account was left usable")
 	}
 }
@@ -217,10 +228,10 @@ func TestFailoverSkipsAnAccountOnCooldown(t *testing.T) {
 	entries, accounts := oneAccountList("auth-2", workbuddyAuth{AccessToken: "t2", Region: intlRegion})
 	stubAccounts(t, entries, accounts)
 
-	markAuthCooldown("auth-2", time.Now().Add(time.Hour))
+	markAuthCooldownForModel("auth-2", "", time.Now().Add(time.Hour))
 
 	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
-	if _, _, errCall := executeChat("auth-1", routed, []byte(`{}`), false); errCall == nil {
+	if _, _, errCall := executeChat("auth-1", routed, testModel, []byte(`{}`), false); errCall == nil {
 		t.Fatal("expected a failure: the only fallback is parked")
 	}
 	if len(*seen) != 1 || (*seen)[0] != "t1" {
@@ -240,11 +251,103 @@ func TestFailoverSkipsDisabledAccounts(t *testing.T) {
 	stubAccounts(t, entries, map[string]workbuddyAuth{"auth-2": {AccessToken: "t2", Region: intlRegion}})
 
 	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
-	if _, _, errCall := executeChat("auth-1", routed, []byte(`{}`), false); errCall == nil {
+	if _, _, errCall := executeChat("auth-1", routed, testModel, []byte(`{}`), false); errCall == nil {
 		t.Fatal("expected a failure: the only fallback is disabled")
 	}
 	if len(*seen) != 1 {
 		t.Fatalf("attempts = %v, want only the routed account", *seen)
+	}
+}
+
+// A 6004 is a per-model usage limit: the account is throttled for the model it
+// asked for, not shut down. Parking the whole account would make a model switch
+// look like a dead credential, which is the opposite of what an operator does
+// when they hit a model limit.
+func TestModelScopedRateLimitParksOnlyThatModel(t *testing.T) {
+	clearAllCooldowns()
+	server, _ := chatStub(t, map[string]int{"t1": http.StatusTooManyRequests, "t2": http.StatusTooManyRequests})
+	stubIntlRegion(t, server.URL)
+	entries, accounts := oneAccountList("auth-2", workbuddyAuth{AccessToken: "t2", Region: intlRegion})
+	stubAccounts(t, entries, accounts)
+
+	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
+	if _, _, errCall := executeChat("auth-1", routed, testModel, []byte(`{}`), false); errCall == nil {
+		t.Fatal("expected the request to fail once every account is throttled")
+	}
+
+	if !authOnCooldown("auth-1", testModel) {
+		t.Fatalf("the limited model is not parked, so the next request repeats the 6004")
+	}
+	if authOnCooldown("auth-1", "glm-5.3") {
+		t.Fatal("switching model on the throttled account is treated as a dead account")
+	}
+	// The fallback is skipped only while it is limited for this model.
+	if !authOnCooldown("auth-2", testModel) {
+		t.Fatal("the fallback that also returned 6004 was not parked for this model")
+	}
+	if authOnCooldown("auth-2", "glm-5.3") {
+		t.Fatal("a 6004 for one model parked the fallback for every model")
+	}
+}
+
+// A rate limit with no 6004 is the account itself being throttled, so it parks
+// every model.
+func TestAccountWideRateLimitParksEveryModel(t *testing.T) {
+	clearAllCooldowns()
+	// 429 with a body that names no model: the whole account is throttled.
+	server, _ := chatStubWithBody(t, map[string]int{"t1": http.StatusTooManyRequests, "t2": http.StatusTooManyRequests},
+		`{"code":0,"msg":"too many requests, reset at 2026-10-09 12:00:00 UTC+8"}`)
+	stubIntlRegion(t, server.URL)
+	entries, accounts := oneAccountList("auth-2", workbuddyAuth{AccessToken: "t2", Region: intlRegion})
+	stubAccounts(t, entries, accounts)
+
+	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
+	if _, _, errCall := executeChat("auth-1", routed, testModel, []byte(`{}`), false); errCall == nil {
+		t.Fatal("expected the request to fail")
+	}
+	if !authOnCooldown("auth-1", testModel) || !authOnCooldown("auth-1", "glm-5.3") {
+		t.Fatal("an account-wide rate limit must park every model, not just the one that happened to ask")
+	}
+}
+
+// A model-scoped parking must not hide the account from a different model's
+// failover list.
+func TestModelScopedCooldownStillOffersTheAccountToOtherModels(t *testing.T) {
+	clearAllCooldowns()
+	server, seen := chatStub(t, map[string]int{"t1": http.StatusTooManyRequests})
+	stubIntlRegion(t, server.URL)
+	entries, accounts := oneAccountList("auth-2", workbuddyAuth{AccessToken: "t2", Region: intlRegion})
+	stubAccounts(t, entries, accounts)
+
+	// auth-2 is parked for one model only.
+	markAuthCooldownForModel("auth-2", "glm-5.3", time.Now().Add(time.Hour))
+
+	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
+	status, body, errCall := executeChat("auth-1", routed, testModel, []byte(`{}`), false)
+
+	if errCall != nil || status != http.StatusOK || len(body) == 0 {
+		t.Fatalf("status=%d err=%v: auth-2 was skipped although it is only parked for another model", status, errCall)
+	}
+	if len(*seen) != 2 || (*seen)[1] != "t2" {
+		t.Fatalf("attempts = %v, want the fallback to be used", *seen)
+	}
+}
+
+func TestIsModelScopedRateLimit(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"code 6004", `{"code":6004,"msg":"usage exceeds frequency limit"}`, true},
+		{"6004 in prose", "usage exceeds frequency limit (6004)", true},
+		{"plain rate limit", "too many requests", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		if got := isModelScopedRateLimit(tc.body); got != tc.want {
+			t.Errorf("%s: isModelScopedRateLimit(%q) = %v, want %v", tc.name, tc.body, got, tc.want)
+		}
 	}
 }
 

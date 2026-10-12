@@ -667,7 +667,7 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	if err := json.Unmarshal(req.StorageJSON, &auth); err != nil || auth.AccessToken == "" {
 		return errorEnvelope("authentication_error", "WorkBuddy auth is missing", http.StatusUnauthorized), nil
 	}
-	status, body, err := executeChat(req.AuthID, auth, req.Payload, stream)
+	status, body, err := executeChat(req.AuthID, auth, req.Model, req.Payload, stream)
 	if err != nil {
 		return errorEnvelope("upstream_error", err.Error(), http.StatusBadGateway), nil
 	}
