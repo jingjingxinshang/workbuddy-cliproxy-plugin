@@ -36,17 +36,17 @@ jobs:
         run: |
           if [ "$GOOS/$GOARCH" = "linux/arm64" ]; then export CC=aarch64-linux-gnu-gcc; fi
           if [ "$GOOS/$GOARCH" = "linux/amd64" ]; then export CC=x86_64-linux-gnu-gcc; fi
-          raw="workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }}"
-          archive="workbuddy_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          raw="workbuddy-jjxs-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.ext }}"
+          archive="workbuddy-jjxs_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
           go build -buildmode=c-shared -o "$raw" .
           rm -f "${raw%.*}.h"
           mkdir package
-          cp "$raw" package/workbuddy.so
-          (cd package && zip -q -j "../$archive" workbuddy.so)
+          cp "$raw" package/workbuddy-jjxs.so
+          (cd package && zip -q -j "../$archive" workbuddy-jjxs.so)
       - uses: actions/upload-artifact@v4
         with:
-          name: workbuddy-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: workbuddy_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
+          name: workbuddy-jjxs-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: workbuddy-jjxs_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.zip
 
   release:
     needs: build-linux

@@ -787,7 +787,7 @@ function loadQuota(authIndex, quiet) {
   state.pending[authIndex] = true;
   delete state.errors[authIndex];
   if (!quiet) render();
-  return fetch('/v0/management/workbuddy/quota?auth_index=' + encodeURIComponent(authIndex), { headers: headers() })
+  return fetch('/v0/management/workbuddy-jjxs/quota?auth_index=' + encodeURIComponent(authIndex), { headers: headers() })
     .then(function (resp) {
       return resp.json().then(function (body) { return { ok: resp.ok, status: resp.status, body: body }; });
     })
@@ -808,7 +808,7 @@ function loadQuota(authIndex, quiet) {
 }
 
 function loadBonusStatus() {
-  return fetch('/v0/management/workbuddy/dailybonus/status', { headers: headers() })
+  return fetch('/v0/management/workbuddy-jjxs/dailybonus/status', { headers: headers() })
     .then(function (resp) { return resp.ok ? resp.json() : null; })
     .then(function (body) {
       var last = body && body.last_run;
@@ -829,7 +829,7 @@ function loadBonusStatus() {
 function claimBonus(authIndex) {
   if (state.runs[authIndex]) return Promise.resolve();
   setRunning(authIndex, true);
-  var url = '/v0/management/workbuddy/dailybonus';
+  var url = '/v0/management/workbuddy-jjxs/dailybonus';
   if (authIndex) url += '?auth_index=' + encodeURIComponent(authIndex);
   return fetch(url, { method: 'POST', headers: headers() })
     .then(function (resp) { return resp.json(); })
@@ -867,7 +867,7 @@ function claimBonusAll() {
 function claim(authIndex) {  var account = accountByAuthIndex(authIndex);
   if (!account || state.runs[authIndex]) return Promise.resolve();
   setRunning(authIndex, true);
-  return fetch('/v0/management/workbuddy/checkin?auth_index=' + encodeURIComponent(authIndex), {
+  return fetch('/v0/management/workbuddy-jjxs/checkin?auth_index=' + encodeURIComponent(authIndex), {
     method: 'POST',
     headers: headers()
   })
@@ -892,7 +892,7 @@ function claim(authIndex) {  var account = accountByAuthIndex(authIndex);
 function claimAll() {
   if (!state.accounts.length) return Promise.resolve();
   setRunning('all', true);
-  return fetch('/v0/management/workbuddy/checkin', { method: 'POST', headers: headers() })
+  return fetch('/v0/management/workbuddy-jjxs/checkin', { method: 'POST', headers: headers() })
     .then(function (resp) { return resp.json(); })
     .then(function (body) {
       var results = (body && body.results) || [];
@@ -936,7 +936,7 @@ function load() {
   if (!key) { toast('请先填写管理密钥。', 'err'); return Promise.resolve(); }
   try { localStorage.setItem('wbaw_mgmt_key', key); } catch (e) {}
   setRunning('load', true);
-  return fetch('/v0/management/workbuddy/accounts', { headers: headers() })
+  return fetch('/v0/management/workbuddy-jjxs/accounts', { headers: headers() })
     .then(function (resp) {
       if (resp.status === 401 || resp.status === 403) throw new Error('管理密钥无效或权限不足（HTTP ' + resp.status + '）');
       if (!resp.ok) throw new Error('读取账号列表失败（HTTP ' + resp.status + '）');

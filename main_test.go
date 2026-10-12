@@ -180,11 +180,11 @@ func TestResourcePageRouting(t *testing.T) {
 		path string
 		want string
 	}{
-		{"accounts page", "/v0/resource/plugins/workbuddy/quota", "<title>WorkBuddy 账号</title>"},
-		{"accounts page with trailing slash", "/v0/resource/plugins/workbuddy/quota/", "<title>WorkBuddy 账号</title>"},
+		{"accounts page", "/v0/resource/plugins/" + providerID + "/quota", "<title>WorkBuddy 账号</title>"},
+		{"accounts page with trailing slash", "/v0/resource/plugins/" + providerID + "/quota/", "<title>WorkBuddy 账号</title>"},
 		// The host derives the id from the library file name, so the resource
 		// base is not necessarily the provider id.
-		{"id derived from file name", "/v0/resource/plugins/workbuddy-v0.2.2/quota", "<title>WorkBuddy 账号</title>"},
+		{"id derived from file name", "/v0/resource/plugins/" + providerID + "-v0.2.2/quota", "<title>WorkBuddy 账号</title>"},
 	}
 
 	for _, testCase := range cases {
@@ -201,10 +201,10 @@ func TestResourcePageRouting(t *testing.T) {
 	}
 }
 
-// The resource path ends in "/workbuddy/quota" too, so it must never be
+// The resource path ends in "/<providerID>/quota" too, so it must never be
 // answered by the JSON route.
 func TestResourceQuotaPageIsNotTheJSONRoute(t *testing.T) {
-	body := string(handleManagement(managementRequestFor("/v0/resource/plugins/workbuddy/quota")).Body)
+	body := string(handleManagement(managementRequestFor("/v0/resource/plugins/" + providerID + "/quota")).Body)
 
 	if strings.HasPrefix(strings.TrimSpace(body), "{") {
 		t.Fatalf("resource page answered with a JSON payload: %s", truncate(body, 80))
@@ -215,7 +215,7 @@ func TestResourceQuotaPageIsNotTheJSONRoute(t *testing.T) {
 }
 
 func TestManagementRouteStillAnswersJSON(t *testing.T) {
-	resp := handleManagement(managementRequestFor("/v0/management/workbuddy/quota"))
+	resp := handleManagement(managementRequestFor("/v0/management/" + providerID + "/quota"))
 
 	if got := resp.Headers.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
 		t.Fatalf("content type = %q, want application/json", got)
@@ -226,7 +226,7 @@ func TestManagementRouteStillAnswersJSON(t *testing.T) {
 }
 
 func TestUnknownManagementPathIsNotFound(t *testing.T) {
-	resp := handleManagement(managementRequestFor("/v0/management/workbuddy/nope"))
+	resp := handleManagement(managementRequestFor("/v0/management/" + providerID + "/nope"))
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
@@ -238,8 +238,8 @@ func TestUnknownManagementPathIsNotFound(t *testing.T) {
 // serve a page or fall through to the quota JSON route.
 func TestLoginResourcePageIsGone(t *testing.T) {
 	for _, path := range []string{
-		"/v0/resource/plugins/workbuddy/",
-		"/v0/resource/plugins/workbuddy",
+		"/v0/resource/plugins/" + providerID + "/",
+		"/v0/resource/plugins/" + providerID,
 	} {
 		resp := handleManagement(managementRequestFor(path))
 
@@ -279,9 +279,9 @@ func TestManagementRegistrationAdvertisesTheAccountsPage(t *testing.T) {
 	// Routes are declared relative to the management prefix, which the host adds
 	// when it registers them.
 	want := map[string]string{
-		"/workbuddy/accounts": "GET",
-		"/workbuddy/quota":    "GET",
-		"/workbuddy/checkin":  "POST",
+		"/" + providerID + "/accounts": "GET",
+		"/" + providerID + "/quota":    "GET",
+		"/" + providerID + "/checkin":  "POST",
 	}
 	got := map[string]string{}
 	for _, route := range envelope.Result.Routes {
@@ -663,11 +663,11 @@ func TestRegisterAppliesAReadableConfig(t *testing.T) {
 // A route method the host never sends (it dispatches by exact method and path)
 // must not be answered as if it were the real one.
 func TestCheckinRouteRejectsNonPost(t *testing.T) {
-	resp := handleManagement(managementRequestWithMethod(http.MethodGet, "/v0/management/workbuddy/checkin"))
+	resp := handleManagement(managementRequestWithMethod(http.MethodGet, "/v0/management/"+providerID+"/checkin"))
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("GET checkin status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 	}
-	resp = handleManagement(managementRequestWithMethod(http.MethodPost, "/v0/management/workbuddy/accounts"))
+	resp = handleManagement(managementRequestWithMethod(http.MethodPost, "/v0/management/"+providerID+"/accounts"))
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("POST accounts status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 	}

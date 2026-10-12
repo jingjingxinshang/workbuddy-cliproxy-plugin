@@ -61,9 +61,12 @@ import (
 )
 
 const (
-	providerID = "workbuddy"
-	pluginName = "WorkBuddy"
-	pluginVer  = "0.3.25"
+	providerID = "workbuddy-jjxs"
+	// legacyIdentity is the identity this plugin registered before it was renamed.
+	// Credential files and their type field still carry it, so it stays readable.
+	legacyIdentity = "workbuddy"
+	pluginName     = "WorkBuddy"
+	pluginVer      = "0.4.0"
 	// pluginAuthor and pluginLogoURL are the same values the store registry
 	// carries, so the panel card and the store entry describe one plugin rather
 	// than two.
@@ -352,27 +355,27 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 			Routes: []pluginapi.ManagementRoute{
 				{
 					Method:      "GET",
-					Path:        "/workbuddy/accounts",
+					Path:        "/" + providerID + "/accounts",
 					Description: "列出所有 WorkBuddy 账号及其身份、凭据状态与签到状态",
 				},
 				{
 					Method:      "GET",
-					Path:        "/workbuddy/quota",
+					Path:        "/" + providerID + "/quota",
 					Description: "读取指定凭据的 WorkBuddy 额度",
 				},
 				{
 					Method:      "POST",
-					Path:        "/workbuddy/checkin",
+					Path:        "/" + providerID + "/checkin",
 					Description: "为指定账号或全部账号执行每日签到",
 				},
 				{
 					Method:      "POST",
-					Path:        "/workbuddy/dailybonus",
+					Path:        "/" + providerID + "/dailybonus",
 					Description: "为指定账号或全部国际账号上报今日活动，领取每日 30 credits 奖励",
 				},
 				{
 					Method:      "GET",
-					Path:        "/workbuddy/dailybonus/status",
+					Path:        "/" + providerID + "/dailybonus/status",
 					Description: "读取国际每日奖励的开关、计划时间与最近一次运行结果",
 				},
 			},
@@ -464,7 +467,11 @@ func parseAuth(raw []byte) pluginapi.AuthParseResponse {
 	if json.Unmarshal(raw, &req) != nil {
 		return pluginapi.AuthParseResponse{}
 	}
-	if req.Provider != providerID && !strings.Contains(strings.ToLower(req.FileName), "workbuddy") {
+	// A credential is claimed when it declares this identity, or when its file
+	// name carries the original one. That second clause is deliberate: credentials
+	// written before the plugin was renamed to workbuddy-jjxs are still on disk as
+	// workbuddy-<uid>.json, and dropping the clause would orphan every one of them.
+	if req.Provider != providerID && !strings.Contains(strings.ToLower(req.FileName), legacyIdentity) {
 		return pluginapi.AuthParseResponse{}
 	}
 	var auth workbuddyAuth
@@ -1344,7 +1351,7 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 	//	/v0/resource/plugins/workbuddy/quota   the page, which the panel loads in an iframe
 	//	/v0/management/workbuddy/quota         the route that page's script calls
 	//
-	// They overlap by suffix — the resource path also ends in "/workbuddy/quota"
+	// They overlap by suffix -- the resource path also ends in "/<providerID>/quota"
 	// — so matching the route first answered the iframe navigation with the
 	// quota JSON, and the menu showed the raw payload instead of the page.
 	if page, okPage := resourcePagePath(path); okPage {
@@ -1407,7 +1414,7 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 			"quota": "/v0/management/workbuddy/quota",
 		})
 		if errMarshal != nil {
-			body = []byte(`{"provider":"workbuddy"}`)
+			body = []byte(`{"provider":"` + providerID + `"}`)
 		}
 		return jsonManagementResponse(body)
 	}

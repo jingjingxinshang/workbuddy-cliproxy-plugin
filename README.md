@@ -2,6 +2,39 @@
 
 独立的 CLIProxyAPI 动态库插件，将 WorkBuddy 登录、模型发现和 Chat Completions 接入 CPA Plugin ABI。
 
+## 插件身份（id）与改名说明
+
+**插件 id 是身份主键**：它同时是
+
+| 用途 | 值 |
+|---|---|
+| 插件 id（宿主由 **.so 文件名**推导） | `workbuddy-jjxs` |
+| auth provider 标识 | `workbuddy-jjxs` |
+| 凭证文件 `type` 与文件名 | `workbuddy-jjxs-<uid>.json` |
+| 配置键 | `plugins.configs.workbuddy-jjxs` |
+| 管理路由前缀 | `/v0/management/workbuddy-jjxs/*` |
+
+**为什么不是 `workbuddy`**：CPA 插件商店判定"已安装"用的是 **registry 的 `id`**（面板里 `item.id === id`），所以两个仓库只要都声明 `id: "workbuddy"`，装其中一个就会让另一个也显示已安装。本项目因此改用带作者标识的独立 id，与其它同名插件互不影响。
+
+**从旧版本升级过来**：本插件曾用 `workbuddy`。磁盘上已有的凭证（文件名 `workbuddy-<uid>.json`、`type: workbuddy`）**仍在认领范围内**（认领规则保留了这一条），所以**不需要重新登录**；但如果宿主按 `type` 严格路由凭证，可能需要把凭证文件里的 `"type": "workbuddy"` 改成 `"type": "workbuddy-jjxs"`：
+
+```bash
+cd <CPA>/auths
+for f in workbuddy-*.json; do
+  python3 - "$f" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+if d.get("type") == "workbuddy":
+    d["type"] = "workbuddy-jjxs"
+    json.dump(d, open(p, "w"), ensure_ascii=False, indent=2)
+    print("retyped", p)
+PY
+done
+```
+
+配置文件里的 `plugins.configs.workbuddy` 也要改成 `plugins.configs.workbuddy-jjxs`（不写也能跑：配置读不出来时插件照样注册，只是用默认值）。
+
 ## 当前能力
 
 - CPA Plugin ABI v1 / schema v6 注册
@@ -82,7 +115,7 @@ git push origin 0.3.18
 }
 ```
 
-- `id` 必须与插件文件名一致（`workbuddy.so`）：宿主是用**文件名**推插件 id 的，改名会让磁盘上已有的凭据失联。
+- `id` 必须与插件文件名一致（`workbuddy-jjxs.so`）：宿主是用**文件名**推插件 id 的，改名会让磁盘上已有的凭据失联。
 - `version` 与 `release_tag` 都必须指向真实存在的 Release。本项目标签**不带 `v` 前缀**，所以两者相同。
 - `logo` 写 raw 地址，商店列表和面板卡片都会用它（面板侧同时来自插件注册的 `Metadata.Logo`，两边保持一致）。
 - **只改描述/标签/图标这类元数据不需要重新发版**：商店每次都直接读 `registry.json`。只有 `version` 变了才需要新 Release。
@@ -119,7 +152,7 @@ WorkBuddy 自身的账号登录属于插件运行时行为，由插件在安装�
 登录不需要插件侧的任何配置，也不需要插件自己的页面。插件实现的是 CPA 的 `AuthProvider`，管理面板的「OAuth 登录」页会为声明了 OAuth 的插件自动渲染一张卡片，点「开始 WorkBuddy 登录」即可；凭据由 CPA 自己保存到 `auths/`：
 
 ```text
-GET /v0/management/workbuddy-auth-url              -> {url, state}
+GET /v0/management/workbuddy-jjxs-auth-url              -> {url, state}
 GET /v0/management/get-auth-status?state=<state>   -> {"status":"ok"} 后凭据已写入
 ```
 
@@ -128,7 +161,7 @@ GET /v0/management/get-auth-status?state=<state>   -> {"status":"ok"} 后凭据�
 ```bash
 # 1. 发起登录，返回 {url, state}
 curl -H "Authorization: Bearer <MANAGEMENT_KEY>" \
-  "http://127.0.0.1:8317/v0/management/workbuddy-auth-url"
+  "http://127.0.0.1:8317/v0/management/workbuddy-jjxs-auth-url"
 
 # 2. 打开返回的 url，用 WorkBuddy 客户端扫码/登录
 
@@ -155,7 +188,7 @@ plugins:
 
 ```bash
 curl -H "Authorization: Bearer <MANAGEMENT_KEY>" \
-  "http://127.0.0.1:8317/v0/management/workbuddy-auth-url?region=intl"
+  "http://127.0.0.1:8317/v0/management/workbuddy-jjxs-auth-url?region=intl"
 ```
 
 ### 国内 / 国际的主机与判定
@@ -182,7 +215,7 @@ Origin/Referer 必须与请求实际发往的主机一致，否则国际网关�
 插件只注册一个资源页面，在 CPA 管理面板中打开 `WorkBuddy 账号` 菜单即可进入：
 
 ```text
-/v0/resource/plugins/workbuddy/quota     账号页
+/v0/resource/plugins/workbuddy-jjxs/quota     账号页
 ```
 
 该页面在本机浏览器中填写管理密钥后调用 CPA 的管理接口，密钥只保存在浏览器 localStorage，不会发给插件。页面会读取面板持久化的主题（`cli-proxy-theme`），自动跟随面板的浅色/深色设置；读不到时回落到系统偏好。
@@ -190,9 +223,9 @@ Origin/Referer 必须与请求实际发往的主机一致，否则国际网关�
 页面调用的路由是：
 
 ```text
-GET  /v0/management/workbuddy/accounts[?name=<凭据文件名>]     账号列表：身份 + 凭据状态 + 签到状态
-GET  /v0/management/workbuddy/quota[?auth_index=...]         单个账号额度
-POST /v0/management/workbuddy/checkin[?auth_index=|?name=]   签到（不带参数 = 全部账号）
+GET  /v0/management/workbuddy-jjxs/accounts[?name=<凭据文件名>]     账号列表：身份 + 凭据状态 + 签到状态
+GET  /v0/management/workbuddy-jjxs/quota[?auth_index=...]         单个账号额度
+POST /v0/management/workbuddy-jjxs/checkin[?auth_index=|?name=]   签到（不带参数 = 全部账号）
 ```
 
 每个账号一张卡片，展示昵称、UID、企业 ID、区域、凭据状态与到期时间、当前套餐、剩余额度与重置时间、签到状态与连续天数，并提供单独的「签到」按钮；顶部有「全部签到」。页面会先列出所有凭据再逐个查额度，不带 `auth_index` 时取第一个凭据。
@@ -231,7 +264,7 @@ POST /billing/meter/daily-checkin    领取每日奖励
 **只在手动触发时领取**，两种方式都是幂等的：
 
 - 账号页的「全部签到」或单个账号的「签到」按钮。
-- 管理接口 `POST /v0/management/workbuddy/checkin`。
+- 管理接口 `POST /v0/management/workbuddy-jjxs/checkin`。
 
 插件**不会**在打开页面、token 刷新或任何其他时机自行领取。“打开页面”被当成“查看”，不会改动你的账号状态。如果你有自己的签到途径，这个功能完全可以不用 —— 它不会主动运行。
 
@@ -262,8 +295,8 @@ POST /v2/report                 上报一次活动，点亮当天
 |---|---|
 | 计划时间 | 本地时间 08:00 / 12:00 / 16:00 / 20:00（每小时窗口） |
 | 开关 | `daily_bonus`，不写 = 启用 |
-| 手动触发 | 顶部「国际奖励」按钮，或 `POST /v0/management/workbuddy/dailybonus`（可带 `?auth_index=`） |
-| 运行状态 | `GET /v0/management/workbuddy/dailybonus/status`；页面载入时读一次，用来画卡片上的徽标 |
+| 手动触发 | 顶部「国际奖励」按钮，或 `POST /v0/management/workbuddy-jjxs/dailybonus`（可带 `?auth_index=`） |
+| 运行状态 | `GET /v0/management/workbuddy-jjxs/dailybonus/status`；页面载入时读一次，用来画卡片上的徽标 |
 
 两条设计规则让它一天跑四次是安全的：
 
@@ -317,7 +350,7 @@ WorkBuddy 原始接口属于第三方服务，登录、额度和模型接口的�
 
 | 徽标 | 含义 |
 |---|---|
-| 已启用 | `plugins.configs.workbuddy.enabled` 为真，宿主愿意加载它 |
+| 已启用 | `plugins.configs.workbuddy-jjxs.enabled` 为真，宿主愿意加载它 |
 | **已注册** | 宿主在 `plugin.register` 上**拿到了可用应答**（元数据 / 菜单 / 配置字段 / 额度因此才有） |
 | 已配置 | 宿主认为它的配置已就绪 |
 
@@ -340,4 +373,4 @@ WorkBuddy 原始接口属于第三方服务，登录、额度和模型接口的�
    ```
    ⚠️ 这两个字段**标量**就好，别写成映射或列表（`default_region: {a: b}` 会解析失败）。
 
-2. **动态库根本没加载。** 检查：文件名必须是 `workbuddy.so`（插件 id 由**文件名**推导，改了名就换了 id，配置项对不上）；架构要匹配宿主（`amd64` / `arm64`）；手动装与商店装不要混用 —— 商店安装会记录 `store:` 并清理其它库文件，可能把手动放的 `.so` 删掉。
+2. **动态库根本没加载。** 检查：文件名必须是 `workbuddy-jjxs.so`（插件 id 由**文件名**推导，改了名就换了 id，配置项对不上）；架构要匹配宿主（`amd64` / `arm64`）；手动装与商店装不要混用 —— 商店安装会记录 `store:` 并清理其它库文件，可能把手动放的 `.so` 删掉。
