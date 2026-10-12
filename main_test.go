@@ -773,3 +773,44 @@ func TestPluginVersionMatchesTheStoreRegistry(t *testing.T) {
 }
 
 var semverPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+
+// The page has to say which build it is.
+//
+// A resource page is embedded in the plugin's own binary and loaded in an
+// iframe, so a page served from a replaced plugin -- or from a browser cache --
+// looks exactly like the current one. Without a stamp on the page itself there is
+// no way to tell which build is on screen, and that question cost a round of
+// guessing.
+func TestAccountsPageStampsItsBuild(t *testing.T) {
+	page := accountsPageHTML()
+	if !strings.Contains(page, "v"+pluginVer) {
+		t.Fatalf("the page does not name the build it came from (want %q somewhere in it)", "v"+pluginVer)
+	}
+	if !strings.Contains(page, `class="ver"`) {
+		t.Fatal("the header build stamp is gone")
+	}
+}
+
+// Both management responses must forbid caching: a cached page hides a plugin
+// replacement, and a cached account list or quota is a stale view by
+// construction.
+func TestManagementResponsesForbidCaching(t *testing.T) {
+	cases := map[string]pluginapi.ManagementResponse{
+		"html": htmlManagementResponse("<p>page</p>"),
+		"json": jsonManagementResponse([]byte(`{}`)),
+	}
+	for name, resp := range cases {
+		if got := resp.Headers.Get("Cache-Control"); !strings.Contains(got, "no-store") {
+			t.Errorf("%s response Cache-Control = %q, want no-store", name, got)
+		}
+		if strings.TrimSpace(resp.Headers.Get("Content-Type")) == "" {
+			t.Errorf("%s response lost its Content-Type", name)
+		}
+	}
+	// Cloning per response keeps one caller's header edit from changing another's.
+	first := htmlManagementResponse("<p>a</p>")
+	first.Headers.Set("Content-Type", "text/plain")
+	if second := htmlManagementResponse("<p>b</p>"); second.Headers.Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatal("the shared header map is being mutated between responses")
+	}
+}

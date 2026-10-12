@@ -114,6 +114,9 @@ func accountsPageHTML() string {
    letter-spacing:.4px;flex:0 0 auto}
  .brand h1{margin:0;font-size:15px;font-weight:620;letter-spacing:-.01em}
  .brand p{margin:1px 0 0;font-size:12px;color:var(--faint)}
+ /* The build is stamped next to the title: a management page that is
+    cached or served by a replaced plugin looks identical otherwise. */
+ .ver{font-family:var(--mono);font-size:11px;letter-spacing:-.01em}
  .actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
  button{display:inline-flex;align-items:center;gap:6px;padding:7px 13px;border-radius:7px;
    border:1px solid var(--line);background:var(--panel-2);color:var(--text);font:inherit;
@@ -258,7 +261,7 @@ func accountsPageHTML() string {
     <div class="logo">WB</div>
     <div>
       <h1>WorkBuddy 账号</h1>
-      <p>额度、签到与国际奖励</p>
+      <p>额度、签到与国际奖励 · <span class="ver">v` + pluginVer + `</span></p>
     </div>
   </div>
   <div class="actions">
@@ -294,6 +297,7 @@ func accountsPageHTML() string {
 
   <div class="foot">
     密钥仅保存在本机 localStorage，不会发送给插件本身。<br>
+    WorkBuddy 插件 v` + pluginVer + ` · 页面为插件内置，随插件版本更新<br>
     签到状态为「未知」表示上游当前没有签到活动，其状态字段整块归零；点「签到」由领取接口给出权威结论，重复领取是安全的。
   </div>
 </main>

@@ -62,7 +62,7 @@ import (
 const (
 	providerID = "workbuddy"
 	pluginName = "WorkBuddy"
-	pluginVer  = "0.3.23"
+	pluginVer  = "0.3.24"
 	// pluginAuthor and pluginLogoURL are the same values the store registry
 	// carries, so the panel card and the store entry describe one plugin rather
 	// than two.
@@ -1360,9 +1360,11 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 }
 
 func jsonManagementResponse(body []byte) pluginapi.ManagementResponse {
+	headers := noStoreHeaders.Clone()
+	headers.Set("Content-Type", "application/json; charset=utf-8")
 	return pluginapi.ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers:    http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
+		Headers:    headers,
 		Body:       body,
 	}
 }
@@ -1379,10 +1381,25 @@ func errorManagementResponse(status int, message string) pluginapi.ManagementRes
 	}
 }
 
+// noStoreHeaders are applied to every management response.
+//
+// A resource page is loaded in an iframe, and this response used to carry only a
+// Content-Type, so the browser was free to reuse a cached copy: the plugin could
+// be replaced and the panel would keep rendering the previous page with no way to
+// tell. Management data is the same shape of problem -- a cached quota or account
+// list is a stale view by construction -- and these calls are local and cheap, so
+// nothing here is worth caching at all.
+var noStoreHeaders = http.Header{
+	"Cache-Control": []string{"no-store, no-cache, must-revalidate"},
+	"Pragma":        []string{"no-cache"},
+}
+
 func htmlManagementResponse(body string) pluginapi.ManagementResponse {
+	headers := noStoreHeaders.Clone()
+	headers.Set("Content-Type", "text/html; charset=utf-8")
 	return pluginapi.ManagementResponse{
 		StatusCode: http.StatusOK,
-		Headers:    http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Headers:    headers,
 		Body:       []byte(body),
 	}
 }
