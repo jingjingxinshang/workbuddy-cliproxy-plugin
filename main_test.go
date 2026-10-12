@@ -304,11 +304,9 @@ func lifecycleRequestFor(configYAML string) []byte {
 // Region is the only setting WorkBuddy login needs, and the panel's plugin
 // config editor is the only place it is written.
 func TestConfigureReadsDefaultRegion(t *testing.T) {
-	t.Cleanup(func() { _ = configure(nil) })
+	t.Cleanup(func() { configure(nil) })
 
-	if errConfigure := configure(lifecycleRequestFor("enabled: true\npriority: 0\ndefault_region: intl\n")); errConfigure != nil {
-		t.Fatalf("configure() error = %v", errConfigure)
-	}
+	configure(lifecycleRequestFor("enabled: true\npriority: 0\ndefault_region: intl\n"))
 	if got := configuredRegion(); got != "intl" {
 		t.Fatalf("configuredRegion() = %q, want intl", got)
 	}
@@ -323,22 +321,18 @@ func TestConfigureReadsDefaultRegion(t *testing.T) {
 }
 
 func TestConfigureFallsBackOnUnusableRegion(t *testing.T) {
-	t.Cleanup(func() { _ = configure(nil) })
+	t.Cleanup(func() { configure(nil) })
 
-	if errConfigure := configure(lifecycleRequestFor("default_region: jp\n")); errConfigure != nil {
-		t.Fatalf("configure() error = %v", errConfigure)
-	}
+	configure(lifecycleRequestFor("default_region: jp\n"))
 	if got := configuredRegion(); got != "cn" {
 		t.Fatalf("configuredRegion() = %q, want the cn fallback", got)
 	}
 }
 
 func TestConfigureWithoutConfigKeepsDefaultRegion(t *testing.T) {
-	t.Cleanup(func() { _ = configure(nil) })
+	t.Cleanup(func() { configure(nil) })
 
-	if errConfigure := configure(lifecycleRequestFor("")); errConfigure != nil {
-		t.Fatalf("configure() error = %v", errConfigure)
-	}
+	configure(lifecycleRequestFor(""))
 	if got := configuredRegion(); got != "cn" {
 		t.Fatalf("configuredRegion() = %q, want cn", got)
 	}
@@ -539,6 +533,127 @@ func TestAccountsPageCarriesNoGoSpelling(t *testing.T) {
 	}
 	if !strings.Contains(page, "function boot(") {
 		t.Fatal("the page no longer defines boot()")
+	}
+}
+
+// lifecycleBody builds a plugin.register / plugin.reconfigure payload. The host
+// serializes the config bytes as base64 inside JSON.
+func lifecycleBody(t *testing.T, configYAML string) []byte {
+	t.Helper()
+	raw, errMarshal := json.Marshal(map[string]any{
+		"config_yaml":    []byte(configYAML),
+		"schema_version": pluginabi.SchemaVersion,
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal lifecycle payload: %v", errMarshal)
+	}
+	return raw
+}
+
+// decodeEnvelope splits a plugin RPC answer into its ok flag and error text.
+func decodeEnvelope(t *testing.T, raw []byte) (bool, string) {
+	t.Helper()
+	var env struct {
+		OK    bool `json:"ok"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal != nil {
+		t.Fatalf("answer is not an envelope: %v (%s)", errUnmarshal, raw)
+	}
+	if env.Error == nil {
+		return env.OK, ""
+	}
+	return env.OK, env.Error.Message
+}
+
+// The host reads a failed plugin.register as "this plugin is not registered": it
+// keeps running as a library and shows as enabled in the panel, but loses its
+// menu, its config fields and its quota entry, and the reason appears only in the
+// host log. So configuration this plugin cannot read must not be able to fail the
+// RPC.
+//
+// Each of the bodies below is YAML the plugin genuinely cannot read; before this
+// was handled every one of them failed the registration.
+func TestRegisterSurvivesAnUnreadableConfig(t *testing.T) {
+	configMu.Lock()
+	previous := pluginCfg
+	configMu.Unlock()
+	t.Cleanup(func() {
+		configMu.Lock()
+		pluginCfg = previous
+		configMu.Unlock()
+	})
+
+	unreadable := []string{
+		"default_region: [intl\n",     // flow sequence left open
+		"\t- bad indent\n",            // a tab cannot start a token
+		"default_region: {a: b}\n",    // map where a string belongs
+		":::not yaml\n",               // not a mapping at all
+		"daily_bonus: {nested: true}", // map where a bool belongs
+	}
+
+	for _, configYAML := range unreadable {
+		answer, errHandle := handleMethod(pluginabi.MethodPluginRegister, lifecycleBody(t, configYAML))
+		if errHandle != nil {
+			t.Fatalf("config %q: handleMethod returned %v", configYAML, errHandle)
+		}
+		if ok, message := decodeEnvelope(t, answer); !ok {
+			t.Fatalf("config %q failed the registration (%q): the host would show an unregistered plugin with no menu", configYAML, message)
+		}
+
+		var registration struct {
+			Result struct {
+				Metadata struct {
+					Name    string `json:"Name"`
+					Version string `json:"Version"`
+				} `json:"Metadata"`
+			} `json:"result"`
+		}
+		if errUnmarshal := json.Unmarshal(answer, &registration); errUnmarshal != nil {
+			t.Fatalf("config %q: registration is not readable: %v", configYAML, errUnmarshal)
+		}
+		if registration.Result.Metadata.Name != pluginName {
+			t.Fatalf("config %q: registered name = %q, want %q", configYAML, registration.Result.Metadata.Name, pluginName)
+		}
+		if registration.Result.Metadata.Version != pluginVer {
+			t.Fatalf("config %q: registered version = %q, want %q", configYAML, registration.Result.Metadata.Version, pluginVer)
+		}
+		// The unusable config falls back to the defaults rather than leaving the
+		// plugin in whatever half-decoded state the parse stopped at.
+		if got := configuredRegion(); got != defaultRegion {
+			t.Fatalf("config %q: region = %q, want the default %q", configYAML, got, defaultRegion)
+		}
+		if !dailyBonusEnabled() {
+			t.Fatalf("config %q: the reward was left disabled instead of defaulting on", configYAML)
+		}
+	}
+}
+
+// A readable config still has to be applied.
+func TestRegisterAppliesAReadableConfig(t *testing.T) {
+	configMu.Lock()
+	previous := pluginCfg
+	configMu.Unlock()
+	t.Cleanup(func() {
+		configMu.Lock()
+		pluginCfg = previous
+		configMu.Unlock()
+	})
+
+	answer, errHandle := handleMethod(pluginabi.MethodPluginRegister, lifecycleBody(t, "default_region: intl\ndaily_bonus: false\n"))
+	if errHandle != nil {
+		t.Fatalf("handleMethod returned %v", errHandle)
+	}
+	if ok, message := decodeEnvelope(t, answer); !ok {
+		t.Fatalf("plugin.register failed (%q)", message)
+	}
+	if got := configuredRegion(); got != "intl" {
+		t.Fatalf("configured region = %q, want intl", got)
+	}
+	if dailyBonusEnabled() {
+		t.Fatal("daily_bonus: false was not applied")
 	}
 }
 

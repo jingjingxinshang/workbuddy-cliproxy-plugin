@@ -385,6 +385,12 @@ func checkinRouteResponse(raw []byte) pluginapi.ManagementResponse {
 			defer wait.Done()
 			result := ensureCheckin(auths[position], checkinPageTimeout)
 			outcomes[position].checkinResult = result
+			// A claim that added credits can be what an account needs to serve
+			// requests again, so it is also the moment to drop any window that was
+			// parked on it for running out.
+			if result.FreshlyClaimed {
+				clearAuthCooldown(outcomes[position].AuthIndex)
+			}
 		}(index)
 	}
 	wait.Wait()

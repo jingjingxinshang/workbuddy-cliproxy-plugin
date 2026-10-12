@@ -149,8 +149,81 @@ func TestFailoverDoesNotRetryAHardCreditError(t *testing.T) {
 	if len(*seen) != 1 {
 		t.Fatalf("attempts = %v, want exactly one: a credit error is not the account's fault to route around", *seen)
 	}
-	if authOnCooldown("auth-1", testModel) {
-		t.Fatal("an out-of-credits account was parked as if it were throttled")
+	// The account is parked, but not as a throttle: a shortage lasts until the
+	// day's allowance is restored, so the window has to reach the daily reset.
+	// Leaving it unparked only means the next request that needs a fallback
+	// spends an attempt on an account known to have nothing.
+	if !authOnCooldown("auth-1", testModel) || !authOnCooldown("auth-1", "glm-5.3") {
+		t.Fatal("an out-of-credits account was left available as a fallback")
+	}
+	if !authOnCooldown("auth-1", "") {
+		t.Fatal("the parking must cover the whole account, not one model")
+	}
+}
+
+// The parked window ends at the next daily reset, not in half an hour.
+func TestHardCreditParkingLastsUntilTheDailyReset(t *testing.T) {
+	clearAllCooldowns()
+	server, _ := chatStub(t, map[string]int{"t1": httpStatusPaymentRequired})
+	stubIntlRegion(t, server.URL)
+	entries, accounts := oneAccountList("auth-2", workbuddyAuth{AccessToken: "t2", Region: intlRegion})
+	stubAccounts(t, entries, accounts)
+
+	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
+	if _, _, errCall := executeChat("auth-1", routed, testModel, []byte(`{}`), false); errCall != nil {
+		t.Fatalf("executeChat returned %v", errCall)
+	}
+
+	cooldownMu.Lock()
+	entry, present := cooldowns[cooldownKey("auth-1", "")]
+	cooldownMu.Unlock()
+	if !present {
+		t.Fatal("no window was recorded")
+	}
+	want := cooldownUntilDailyReset(time.Now())
+	if entry.NextRetryAt.Sub(want) > time.Second || want.Sub(entry.NextRetryAt) > time.Second {
+		t.Fatalf("window ends at %s, want the daily reset %s", entry.NextRetryAt, want)
+	}
+	if hour := entry.NextRetryAt.Hour(); hour != dailyResetHour {
+		t.Fatalf("window ends at hour %d, want %d", hour, dailyResetHour)
+	}
+}
+
+// A parked account is not offered to a request that needs a fallback.
+func TestHardCreditParkingKeepsTheAccountOutOfTheFallbacks(t *testing.T) {
+	clearAllCooldowns()
+	server, seen := chatStub(t, map[string]int{"t1": http.StatusTooManyRequests, "t2": http.StatusTooManyRequests})
+	stubIntlRegion(t, server.URL)
+	entries, accounts := oneAccountList("auth-2", workbuddyAuth{AccessToken: "t2", Region: intlRegion})
+	stubAccounts(t, entries, accounts)
+
+	markAuthCooldownForModel("auth-2", "", cooldownUntilDailyReset(time.Now()))
+
+	routed := workbuddyAuth{AccessToken: "t1", Region: intlRegion}
+	if _, _, errCall := executeChat("auth-1", routed, testModel, []byte(`{}`), false); errCall == nil {
+		t.Fatal("expected a failure: the only fallback has no credits")
+	}
+	if len(*seen) != 1 || (*seen)[0] != "t1" {
+		t.Fatalf("attempts = %v, want only the routed account", *seen)
+	}
+}
+
+func TestCooldownUntilDailyReset(t *testing.T) {
+	location := time.FixedZone("test", 8*60*60)
+	// Before the reset hour: today's reset.
+	early := time.Date(2026, 10, 12, 1, 30, 0, 0, location)
+	if got := cooldownUntilDailyReset(early); got.Day() != 12 || got.Hour() != dailyResetHour {
+		t.Fatalf("1:30 -> %s, want 04:00 on the same day", got)
+	}
+	// After it: the next day's.
+	late := time.Date(2026, 10, 12, 9, 0, 0, 0, location)
+	if got := cooldownUntilDailyReset(late); got.Day() != 13 || got.Hour() != dailyResetHour {
+		t.Fatalf("9:00 -> %s, want 04:00 the next day", got)
+	}
+	// Exactly at the hour: the next day, so the window is never zero-length.
+	exact := time.Date(2026, 10, 12, dailyResetHour, 0, 0, 0, location)
+	if got := cooldownUntilDailyReset(exact); got.Day() != 13 {
+		t.Fatalf("exactly 04:00 -> %s, want the next day", got)
 	}
 }
 

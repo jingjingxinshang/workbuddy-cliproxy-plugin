@@ -310,3 +310,34 @@ CPA 宿主的冷却与重试**只对它自己进程内的执行器生效**。`c-
 登录成功后，WorkBuddy 模型会出现在 CPA 的模型列表中。
 
 WorkBuddy 原始接口属于第三方服务，登录、额度和模型接口的使用必须符合 WorkBuddy 服务条款。
+
+## 排障：面板显示「已启用」但「未注册」、菜单不出现
+
+面板上这三个徽标是**独立**的：
+
+| 徽标 | 含义 |
+|---|---|
+| 已启用 | `plugins.configs.workbuddy.enabled` 为真，宿主愿意加载它 |
+| **已注册** | 宿主在 `plugin.register` 上**拿到了可用应答**（元数据 / 菜单 / 配置字段 / 额度因此才有） |
+| 已配置 | 宿主认为它的配置已就绪 |
+
+**「已启用 + 未注册」= 动态库加载了，但 `plugin.register` 没有成功。** 这时菜单、配置字段与额度条目会一起消失，而**面板不显示原因**（`PluginListEntry` 没有错误字段）—— 只能看宿主日志。
+
+两个可能：
+
+1. **配置本体读不出来。** 宿主要求的 YAML 只要解析失败（类型不匹配、缩进里有制表符、flow 序列没闭合），宿主就拿不到注册信息。**0.3.21 起这条不再致命**：插件会用默认值继续注册，并把原因写进日志：
+   ```text
+   [workbuddy] plugin config is not readable, keeping defaults: yaml: unmarshal errors:
+     line 1: cannot unmarshal !!map into string
+   ```
+   看到这一行说明**你的配置写错了**（插件本身没问题），把它删掉或改对即可。合法写法只有：
+   ```yaml
+   plugins:
+     configs:
+       workbuddy:
+         default_region: intl     # cn | intl，默认 cn
+         daily_bonus: true        # 可选，默认 true
+   ```
+   ⚠️ 这两个字段**标量**就好，别写成映射或列表（`default_region: {a: b}` 会解析失败）。
+
+2. **动态库根本没加载。** 检查：文件名必须是 `workbuddy.so`（插件 id 由**文件名**推导，改了名就换了 id，配置项对不上）；架构要匹配宿主（`amd64` / `arm64`）；手动装与商店装不要混用 —— 商店安装会记录 `store:` 并清理其它库文件，可能把手动放的 `.so` 删掉。

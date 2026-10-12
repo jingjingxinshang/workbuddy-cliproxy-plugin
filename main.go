@@ -301,9 +301,12 @@ func cliproxyPluginShutdown() {
 func handleMethod(method string, raw []byte) ([]byte, error) {
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
-		if errConfigure := configure(raw); errConfigure != nil {
-			return errorEnvelope("invalid_config", errConfigure.Error(), http.StatusBadRequest), nil
-		}
+		// Deliberately unconditional. The host reads a failed plugin.register as
+		// "this plugin is not registered": it stays enabled in the panel but loses
+		// its menu, its config fields and its quota entry, with the reason visible
+		// only in the host log. A configuration value this plugin cannot read is
+		// not worth that, and configure() reports what it could not read instead.
+		configure(raw)
 		return okEnvelope(registrationData())
 	case pluginabi.MethodAuthIdentifier, pluginabi.MethodExecutorIdentifier, pluginabi.MethodQuotaIdentifier:
 		return okEnvelope(identifierResponse{Identifier: providerID})
@@ -396,16 +399,26 @@ func registrationData() registration {
 // passes this plugin's plugins.configs.workbuddy section here as YAML: the
 // default region (the panel's OAuth card sends no parameters, so it cannot pick
 // a cluster) and whether the scheduled international reward may run.
-func configure(raw []byte) error {
+// configure applies the configuration the host delivers on register and
+// reconfigure.
+//
+// It never fails. Returning an error here used to fail the register RPC, and the
+// host treats a failed registration as "not registered" -- the plugin kept
+// running as a library but lost its menu, its config fields and its quota entry,
+// and the only place the reason appeared was the host log. Any YAML the plugin
+// cannot read (a type mismatch on a known key, a stray indent, a flow sequence
+// left open) was enough to do that. The plugin therefore keeps its defaults and
+// says what it could not read.
+func configure(raw []byte) {
 	cfg := pluginConfig{DefaultRegion: defaultRegion}
 	if len(raw) > 0 {
 		var req lifecycleRequest
 		if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
-			return errUnmarshal
-		}
-		if len(req.ConfigYAML) > 0 {
+			warn("register payload is not readable, keeping defaults: %v", errUnmarshal)
+		} else if len(req.ConfigYAML) > 0 {
 			if errUnmarshal := yaml.Unmarshal(req.ConfigYAML, &cfg); errUnmarshal != nil {
-				return errUnmarshal
+				warn("plugin config is not readable, keeping defaults: %v", errUnmarshal)
+				cfg = pluginConfig{DefaultRegion: defaultRegion}
 			}
 		}
 	}
@@ -413,7 +426,6 @@ func configure(raw []byte) error {
 	configMu.Lock()
 	pluginCfg = cfg
 	configMu.Unlock()
-	return nil
 }
 
 // normalizeRegion keeps only regions this plugin has a profile for, so an

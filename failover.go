@@ -38,7 +38,21 @@ const (
 	// httpStatusPaymentRequired is the upstream's "out of credits" status. It is
 	// a hard failure: another account would only be billed for the same request.
 	httpStatusPaymentRequired = 402
+	// dailyResetHour is the local hour the day's allowance is expected to be
+	// restored. An account that ran out is parked until then rather than for the
+	// generic window: a shortage does not clear in thirty minutes, and leaving it
+	// in the list only spends a request on it every time a fallback is needed.
+	dailyResetHour = 4
 )
+
+// cooldownUntilDailyReset returns the next daily reset in the local timezone.
+func cooldownUntilDailyReset(now time.Time) time.Time {
+	reset := time.Date(now.Year(), now.Month(), now.Day(), dailyResetHour, 0, 0, 0, now.Location())
+	if !reset.After(now) {
+		reset = reset.Add(24 * time.Hour)
+	}
+	return reset
+}
 
 type authCooldown struct {
 	NextRetryAt time.Time
@@ -312,6 +326,14 @@ func executeChat(routedAuthIndex string, routedAuth workbuddyAuth, model string,
 		}
 		lastStatus, lastBody, lastErr = status, body, errCall
 		if !isRateLimitResponse(status, string(body)) {
+			// An out-of-credits account is parked until the next daily reset so it
+			// stops being offered as a fallback, but the request still ends here: the
+			// failure is not about the request, and replaying it would bill a second
+			// account for it.
+			if isHardCreditError(status, string(body)) {
+				markAuthCooldownForModel(candidate.AuthIndex, "", cooldownUntilDailyReset(time.Now()))
+				warn("account %s is out of credits; parked until the next daily reset", candidate.AuthIndex)
+			}
 			return status, body, errCall
 		}
 		// 6004 is a model-level limit, so only that model is parked; the account
