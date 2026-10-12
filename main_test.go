@@ -180,11 +180,11 @@ func TestResourcePageRouting(t *testing.T) {
 		path string
 		want string
 	}{
-		{"accounts page", "/v0/resource/plugins/" + providerID + "/quota", "<title>WorkBuddy 账号</title>"},
-		{"accounts page with trailing slash", "/v0/resource/plugins/" + providerID + "/quota/", "<title>WorkBuddy 账号</title>"},
+		{"accounts page", "/v0/resource/plugins/" + pluginID + "/quota", "<title>WorkBuddy 账号</title>"},
+		{"accounts page with trailing slash", "/v0/resource/plugins/" + pluginID + "/quota/", "<title>WorkBuddy 账号</title>"},
 		// The host derives the id from the library file name, so the resource
 		// base is not necessarily the provider id.
-		{"id derived from file name", "/v0/resource/plugins/" + providerID + "-v0.2.2/quota", "<title>WorkBuddy 账号</title>"},
+		{"id derived from file name", "/v0/resource/plugins/" + pluginID + "-v0.2.2/quota", "<title>WorkBuddy 账号</title>"},
 	}
 
 	for _, testCase := range cases {
@@ -204,7 +204,7 @@ func TestResourcePageRouting(t *testing.T) {
 // The resource path ends in "/<providerID>/quota" too, so it must never be
 // answered by the JSON route.
 func TestResourceQuotaPageIsNotTheJSONRoute(t *testing.T) {
-	body := string(handleManagement(managementRequestFor("/v0/resource/plugins/" + providerID + "/quota")).Body)
+	body := string(handleManagement(managementRequestFor("/v0/resource/plugins/" + pluginID + "/quota")).Body)
 
 	if strings.HasPrefix(strings.TrimSpace(body), "{") {
 		t.Fatalf("resource page answered with a JSON payload: %s", truncate(body, 80))
@@ -215,7 +215,7 @@ func TestResourceQuotaPageIsNotTheJSONRoute(t *testing.T) {
 }
 
 func TestManagementRouteStillAnswersJSON(t *testing.T) {
-	resp := handleManagement(managementRequestFor("/v0/management/" + providerID + "/quota"))
+	resp := handleManagement(managementRequestFor("/v0/management/" + pluginID + "/quota"))
 
 	if got := resp.Headers.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
 		t.Fatalf("content type = %q, want application/json", got)
@@ -226,7 +226,7 @@ func TestManagementRouteStillAnswersJSON(t *testing.T) {
 }
 
 func TestUnknownManagementPathIsNotFound(t *testing.T) {
-	resp := handleManagement(managementRequestFor("/v0/management/" + providerID + "/nope"))
+	resp := handleManagement(managementRequestFor("/v0/management/" + pluginID + "/nope"))
 
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNotFound)
@@ -238,8 +238,8 @@ func TestUnknownManagementPathIsNotFound(t *testing.T) {
 // serve a page or fall through to the quota JSON route.
 func TestLoginResourcePageIsGone(t *testing.T) {
 	for _, path := range []string{
-		"/v0/resource/plugins/" + providerID + "/",
-		"/v0/resource/plugins/" + providerID,
+		"/v0/resource/plugins/" + pluginID + "/",
+		"/v0/resource/plugins/" + pluginID,
 	} {
 		resp := handleManagement(managementRequestFor(path))
 
@@ -279,9 +279,9 @@ func TestManagementRegistrationAdvertisesTheAccountsPage(t *testing.T) {
 	// Routes are declared relative to the management prefix, which the host adds
 	// when it registers them.
 	want := map[string]string{
-		"/" + providerID + "/accounts": "GET",
-		"/" + providerID + "/quota":    "GET",
-		"/" + providerID + "/checkin":  "POST",
+		"/" + pluginID + "/accounts": "GET",
+		"/" + pluginID + "/quota":    "GET",
+		"/" + pluginID + "/checkin":  "POST",
 	}
 	got := map[string]string{}
 	for _, route := range envelope.Result.Routes {
@@ -676,11 +676,11 @@ func TestRegisterAppliesAReadableConfig(t *testing.T) {
 // A route method the host never sends (it dispatches by exact method and path)
 // must not be answered as if it were the real one.
 func TestCheckinRouteRejectsNonPost(t *testing.T) {
-	resp := handleManagement(managementRequestWithMethod(http.MethodGet, "/v0/management/"+providerID+"/checkin"))
+	resp := handleManagement(managementRequestWithMethod(http.MethodGet, "/v0/management/"+pluginID+"/checkin"))
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("GET checkin status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 	}
-	resp = handleManagement(managementRequestWithMethod(http.MethodPost, "/v0/management/"+providerID+"/accounts"))
+	resp = handleManagement(managementRequestWithMethod(http.MethodPost, "/v0/management/"+pluginID+"/accounts"))
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("POST accounts status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
 	}
@@ -777,8 +777,10 @@ func TestPluginVersionMatchesTheStoreRegistry(t *testing.T) {
 	if entry.ReleaseTag != pluginVer {
 		t.Fatalf("release tag drift: tag %q, plugin reports %q", entry.ReleaseTag, pluginVer)
 	}
-	if entry.ID != providerID {
-		t.Fatalf("registry id %q does not match the provider id %q", entry.ID, providerID)
+	// The registry id is the install identity: it is what the store matches an
+	// entry against, and what the host derives from the library file name.
+	if entry.ID != pluginID {
+		t.Fatalf("registry id %q does not match the plugin id %q", entry.ID, pluginID)
 	}
 	if !semverPattern.MatchString(pluginVer) {
 		t.Fatalf("plugin version %q is not a plain semantic version", pluginVer)
@@ -854,36 +856,64 @@ func TestNoStaleIdentityInServedPaths(t *testing.T) {
 	}
 
 	// The status payload names the quota route for a caller.
-	status := handleManagement(managementRequestFor("/v0/management/" + providerID + "/status"))
+	status := handleManagement(managementRequestFor("/v0/management/" + pluginID + "/status"))
 	if strings.Contains(string(status.Body), "/workbuddy/") {
 		t.Errorf("the status payload still points at the previous identity: %s", truncate(string(status.Body), 200))
 	}
 	// ...and it has to name the right one.
-	if !strings.Contains(string(status.Body), "/v0/management/"+providerID+"/quota") {
+	if !strings.Contains(string(status.Body), "/v0/management/"+pluginID+"/quota") {
 		t.Errorf("the status payload does not name the quota route: %s", truncate(string(status.Body), 200))
 	}
 }
 
 // The identity is also what the plugin tells the host it is, so it has to be the
 // same string everywhere it appears.
-func TestIdentityIsConsistent(t *testing.T) {
-	if providerID == legacyIdentity {
-		t.Fatalf("providerID (%q) still equals the legacy identity", providerID)
+func TestProviderIdentityIsStableAndDistinctFromThePluginID(t *testing.T) {
+	// Frozen. Credentials on disk declare it, and the host routes a credential to
+	// the provider its type names, so changing it is a data migration rather than a
+	// rename: the plugin stops being offered the accounts it already has, and its
+	// model list goes empty because every model comes from a credential.
+	if providerID != "workbuddy" {
+		t.Fatalf("providerID = %q; credentials on disk declare %q, so they would no longer be routed here", providerID, "workbuddy")
 	}
-	if !strings.Contains(providerID, legacyIdentity) {
-		t.Fatalf("providerID %q should still contain %q so the credential claim keeps matching", providerID, legacyIdentity)
+	// Distinct, or the store cannot tell this plugin apart from another claiming
+	// the same provider.
+	if pluginID == providerID {
+		t.Fatalf("pluginID (%q) equals providerID; the store matches entries by plugin id", pluginID)
+	}
+	if !strings.Contains(pluginID, providerID) {
+		t.Fatalf("pluginID %q should still contain %q so it stays recognisably this project", pluginID, providerID)
 	}
 
-	// The credential files this plugin writes are named after the identity.
+	// What the plugin advertises to the host is the provider identity, because that
+	// is what the host keys providers, credentials and executors by.
+	for _, method := range []string{
+		pluginabi.MethodAuthIdentifier,
+		pluginabi.MethodExecutorIdentifier,
+		pluginabi.MethodQuotaIdentifier,
+	} {
+		raw, errHandle := handleMethod(method, nil)
+		if errHandle != nil {
+			t.Fatalf("%s: %v", method, errHandle)
+		}
+		if !strings.Contains(string(raw), `"identifier":"`+providerID+`"`) {
+			t.Fatalf("%s advertises %s, want the provider identity %q", method, truncate(string(raw), 120), providerID)
+		}
+	}
+
+	// Credential files keep the names they already have on disk.
 	fileName := credentialFileName(workbuddyAuth{UID: "abc123"})
-	if !strings.HasPrefix(fileName, providerID+"-") {
-		t.Fatalf("credential file %q is not named after the identity %q", fileName, providerID)
+	if fileName != providerID+"-abc123.json" {
+		t.Fatalf("credential file = %q, want it named after the provider identity", fileName)
+	}
+	if got := authData(workbuddyAuth{AccessToken: "t"}, fileName); got.Provider != providerID {
+		t.Fatalf("credential type = %q, want %q", got.Provider, providerID)
 	}
 
-	// ...and a credential written under the old identity is still claimed.
-	legacy := []byte(`{"type":"` + legacyIdentity + `","access_token":"t","refresh_token":"r"}`)
-	resp := parseAuth(authParseRequestFor(legacy, legacyIdentity+"-0851ce35.json"))
-	if !resp.Handled {
-		t.Fatal("a credential written before the rename is no longer claimed, which orphans it")
+	// A credential written by any earlier release is still claimed, or upgrading
+	// orphans every account.
+	onDisk := []byte(`{"type":"` + providerID + `","access_token":"t","refresh_token":"r"}`)
+	if resp := parseAuth(authParseRequestFor(onDisk, providerID+"-0851ce35.json")); !resp.Handled {
+		t.Fatal("a credential already on disk is no longer claimed")
 	}
 }

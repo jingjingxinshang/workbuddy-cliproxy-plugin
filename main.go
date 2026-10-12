@@ -61,12 +61,22 @@ import (
 )
 
 const (
-	providerID = "workbuddy-jjxs"
-	// legacyIdentity is the identity this plugin registered before it was renamed.
-	// Credential files and their type field still carry it, so it stays readable.
-	legacyIdentity = "workbuddy"
-	pluginName     = "WorkBuddy"
-	pluginVer      = "0.4.1"
+	// providerID is the provider identity the host keys credentials by: the auth
+	// provider identifier, the credential type written into auth files, the file
+	// name prefix, and the provider name on models and quota.
+	//
+	// It must not change with the plugin id. Every credential already on disk
+	// declares it, and the host routes a credential to the provider its type names,
+	// so changing it leaves every existing account unclaimed -- which shows up as
+	// the plugin losing its accounts and its model list going empty.
+	providerID = "workbuddy"
+	// pluginID is the install identity: the host derives it from the library file
+	// name, and it keys this plugin's configuration section and its management
+	// routes. It is what the store matches an entry against, which is why it is
+	// distinct from any other WorkBuddy plugin.
+	pluginID   = "workbuddy-jjxs"
+	pluginName = "WorkBuddy"
+	pluginVer  = "0.4.2"
 	// pluginAuthor and pluginLogoURL are the same values the store registry
 	// carries, so the panel card and the store entry describe one plugin rather
 	// than two.
@@ -355,27 +365,27 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 			Routes: []pluginapi.ManagementRoute{
 				{
 					Method:      "GET",
-					Path:        "/" + providerID + "/accounts",
+					Path:        "/" + pluginID + "/accounts",
 					Description: "列出所有 WorkBuddy 账号及其身份、凭据状态与签到状态",
 				},
 				{
 					Method:      "GET",
-					Path:        "/" + providerID + "/quota",
+					Path:        "/" + pluginID + "/quota",
 					Description: "读取指定凭据的 WorkBuddy 额度",
 				},
 				{
 					Method:      "POST",
-					Path:        "/" + providerID + "/checkin",
+					Path:        "/" + pluginID + "/checkin",
 					Description: "为指定账号或全部账号执行每日签到",
 				},
 				{
 					Method:      "POST",
-					Path:        "/" + providerID + "/dailybonus",
+					Path:        "/" + pluginID + "/dailybonus",
 					Description: "为指定账号或全部国际账号上报今日活动，领取每日 30 credits 奖励",
 				},
 				{
 					Method:      "GET",
-					Path:        "/" + providerID + "/dailybonus/status",
+					Path:        "/" + pluginID + "/dailybonus/status",
 					Description: "读取国际每日奖励的开关、计划时间与最近一次运行结果",
 				},
 			},
@@ -471,7 +481,7 @@ func parseAuth(raw []byte) pluginapi.AuthParseResponse {
 	// name carries the original one. That second clause is deliberate: credentials
 	// written before the plugin was renamed to workbuddy-jjxs are still on disk as
 	// workbuddy-<uid>.json, and dropping the clause would orphan every one of them.
-	if req.Provider != providerID && !strings.Contains(strings.ToLower(req.FileName), legacyIdentity) {
+	if req.Provider != providerID && !strings.Contains(strings.ToLower(req.FileName), providerID) {
 		return pluginapi.AuthParseResponse{}
 	}
 	var auth workbuddyAuth
@@ -1367,14 +1377,14 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 
 	// Plugin-owned routes. The host dispatches these by exact method and path,
 	// so every branch here is also declared in the management registration.
-	if strings.HasSuffix(path, "/"+providerID+"/accounts") {
+	if strings.HasSuffix(path, "/"+pluginID+"/accounts") {
 		if method := managementRequestMethod(raw); method != "" && method != http.MethodGet {
 			return errorManagementResponse(http.StatusMethodNotAllowed, "accounts is a GET route")
 		}
 		return accountsView(raw)
 	}
 
-	if strings.HasSuffix(path, "/"+providerID+"/checkin") {
+	if strings.HasSuffix(path, "/"+pluginID+"/checkin") {
 		if method := managementRequestMethod(raw); method != "" && method != http.MethodPost {
 			return errorManagementResponse(http.StatusMethodNotAllowed, "checkin is a POST route")
 		}
@@ -1383,21 +1393,21 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 
 	// International daily reward. The status route is matched first because
 	// the trigger's own path is a prefix of it.
-	if strings.HasSuffix(path, "/"+providerID+"/dailybonus/status") {
+	if strings.HasSuffix(path, "/"+pluginID+"/dailybonus/status") {
 		if method := managementRequestMethod(raw); method != "" && method != http.MethodGet {
 			return errorManagementResponse(http.StatusMethodNotAllowed, "dailybonus status is a GET route")
 		}
 		return dailyBonusStatusResponse()
 	}
 
-	if strings.HasSuffix(path, "/"+providerID+"/dailybonus") {
+	if strings.HasSuffix(path, "/"+pluginID+"/dailybonus") {
 		if method := managementRequestMethod(raw); method != "" && method != http.MethodPost {
 			return errorManagementResponse(http.StatusMethodNotAllowed, "dailybonus is a POST route")
 		}
 		return dailyBonusRouteResponse(raw)
 	}
 	// data.
-	if strings.HasSuffix(path, "/"+providerID+"/quota") {
+	if strings.HasSuffix(path, "/"+pluginID+"/quota") {
 		return quotaRouteResponse(raw)
 	}
 
@@ -1411,7 +1421,7 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 				"start":  "/v0/management/" + providerID + "-auth-url",
 				"status": "/v0/management/get-auth-status",
 			},
-			"quota": "/v0/management/" + providerID + "/quota",
+			"quota": "/v0/management/" + pluginID + "/quota",
 		})
 		if errMarshal != nil {
 			body = []byte(`{"provider":"` + providerID + `"}`)
@@ -1510,7 +1520,7 @@ func resolveAuthIndex(raw []byte) (string, error) {
 	return "", fmt.Errorf("no WorkBuddy credential found (provider=%s)", providerID)
 }
 
-// quotaRouteResponse answers GET /v0/management/<providerID>/quota[?auth_index=...]
+// quotaRouteResponse answers GET /v0/management/<pluginID>/quota[?auth_index=...]
 func quotaRouteResponse(raw []byte) pluginapi.ManagementResponse {
 	authIndex, errResolve := resolveAuthIndex(raw)
 	if errResolve != nil {

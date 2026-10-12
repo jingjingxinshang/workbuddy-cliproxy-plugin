@@ -2,40 +2,32 @@
 
 独立的 CLIProxyAPI 动态库插件，将 WorkBuddy 登录、模型发现和 Chat Completions 接入 CPA Plugin ABI。
 
-## 插件身份（id）与改名说明
+## 两个身份：插件 id 与 provider id（重要）
 
-**插件 id 是身份主键**：它同时是
+这个插件有**两个不能混的身份**，改动任何一个之前请先读这一节：
 
-| 用途 | 值 |
-|---|---|
-| 插件 id（宿主由 **.so 文件名**推导） | `workbuddy-jjxs` |
-| auth provider 标识 | `workbuddy-jjxs` |
-| 凭证文件 `type` 与文件名 | `workbuddy-jjxs-<uid>.json` |
-| 配置键 | `plugins.configs.workbuddy-jjxs` |
-| 管理路由前缀 | `/v0/management/workbuddy-jjxs/*` |
+| | 插件身份（install id） | provider 身份（credential id） |
+|---|---|---|
+| 值 | `workbuddy-jjxs` | `workbuddy` |
+| 来源 | 宿主由 **.so 文件名**推导 | 插件自己声明的标识符 |
+| 决定什么 | 商店条目匹配、配置键 `plugins.configs.<id>`、管理路由前缀 | auth provider 标识、凭证文件 `type` 与文件名、模型/额度上的 provider 名 |
+| 能改吗 | **可以**（改文件名 + registry 的 `id`） | **不要改** |
 
-**为什么不是 `workbuddy`**：CPA 插件商店判定"已安装"用的是 **registry 的 `id`**（面板里 `item.id === id`），所以两个仓库只要都声明 `id: "workbuddy"`，装其中一个就会让另一个也显示已安装。本项目因此改用带作者标识的独立 id，与其它同名插件互不影响。
+**为什么 provider 身份不能改**：宿主按凭证的 `type` 把凭证路由给对应 provider。改了它，磁盘上已有的凭证（`type: workbuddy`、`workbuddy-<uid>.json`）就再也**不会被送到本插件**，表现是：**所有账号消失、模型列表变空**（本插件没有静态模型，模型全部来自凭证）。这是一个**数据迁移**，不是改名 —— 真要做，必须同时把所有凭证的 `type` 改掉。
 
-**从旧版本升级过来**：本插件曾用 `workbuddy`。磁盘上已有的凭证（文件名 `workbuddy-<uid>.json`、`type: workbuddy`）**仍在认领范围内**（认领规则保留了这一条），所以**不需要重新登录**；但如果宿主按 `type` 严格路由凭证，可能需要把凭证文件里的 `"type": "workbuddy"` 改成 `"type": "workbuddy-jjxs"`：
+**为什么插件身份要改成 `workbuddy-jjxs`**：CPA 商店判定"已安装"用的是 registry 的 `id`（`item.id === id`）。如果两个仓库都声明 `id: workbuddy`，装其中一个就会让另一个也显示已安装。带上作者标识后两者互不影响。
 
-```bash
-cd <CPA>/auths
-for f in workbuddy-*.json; do
-  python3 - "$f" <<'PY'
-import json, sys
-p = sys.argv[1]
-d = json.load(open(p))
-if d.get("type") == "workbuddy":
-    d["type"] = "workbuddy-jjxs"
-    json.dump(d, open(p, "w"), ensure_ascii=False, indent=2)
-    print("retyped", p)
-PY
-done
-```
+### 升级到 0.4.2
 
-配置文件里的 `plugins.configs.workbuddy` 也要改成 `plugins.configs.workbuddy-jjxs`（不写也能跑：配置读不出来时插件照样注册，只是用默认值）。
+- **不需要重新登录，也不需要改凭证**（provider 身份已还原为 `workbuddy`）
+- 只需把配置段改名：`plugins.configs.workbuddy` → `plugins.configs.workbuddy-jjxs`
+  （不改也能跑：配置读不出来时插件照样注册，只是用默认值）
+- 管理接口路径随之变为 `/v0/management/workbuddy-jjxs/*`；账号页路径为 `/v0/resource/plugins/workbuddy-jjxs/quota`
+- 登录授权入口仍是 `/v0/management/workbuddy-auth-url`（它跟的是 **provider** 身份）
 
-## 当前能力
+> 0.4.0 / 0.4.1 曾把 provider 身份也一起改掉，结果就是账号与模型全部消失。0.4.2 起两者分离。
+
+## 当前能力## 当前能力
 
 - CPA Plugin ABI v1 / schema v6 注册
 - WorkBuddy CN 和 INTL 登录状态创建与轮询
@@ -152,7 +144,7 @@ WorkBuddy 自身的账号登录属于插件运行时行为，由插件在安装�
 登录不需要插件侧的任何配置，也不需要插件自己的页面。插件实现的是 CPA 的 `AuthProvider`，管理面板的「OAuth 登录」页会为声明了 OAuth 的插件自动渲染一张卡片，点「开始 WorkBuddy 登录」即可；凭据由 CPA 自己保存到 `auths/`：
 
 ```text
-GET /v0/management/workbuddy-jjxs-auth-url              -> {url, state}
+GET /v0/management/workbuddy-auth-url              -> {url, state}
 GET /v0/management/get-auth-status?state=<state>   -> {"status":"ok"} 后凭据已写入
 ```
 
@@ -161,7 +153,7 @@ GET /v0/management/get-auth-status?state=<state>   -> {"status":"ok"} 后凭据�
 ```bash
 # 1. 发起登录，返回 {url, state}
 curl -H "Authorization: Bearer <MANAGEMENT_KEY>" \
-  "http://127.0.0.1:8317/v0/management/workbuddy-jjxs-auth-url"
+  "http://127.0.0.1:8317/v0/management/workbuddy-auth-url"
 
 # 2. 打开返回的 url，用 WorkBuddy 客户端扫码/登录
 
@@ -188,7 +180,7 @@ plugins:
 
 ```bash
 curl -H "Authorization: Bearer <MANAGEMENT_KEY>" \
-  "http://127.0.0.1:8317/v0/management/workbuddy-jjxs-auth-url?region=intl"
+  "http://127.0.0.1:8317/v0/management/workbuddy-auth-url?region=intl"
 ```
 
 ### 国内 / 国际的主机与判定
