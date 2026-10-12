@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -219,4 +222,84 @@ func metricValue(resp pluginapi.QuotaFetchResponse, key string) (float64, bool) 
 		}
 	}
 	return 0, false
+}
+
+// packageJSON is one package fixture.
+func packageJSON(name, code string, remain, size float64, end string) string {
+	return `{"AccountId":1,"PackageName":"` + name + `","PackageCode":"` + code + `",` +
+		`"CycleCapacityRemain":` + json.Number(formatNumber(remain)).String() + `,` +
+		`"CycleCapacitySize":` + json.Number(formatNumber(size)).String() + `,` +
+		`"CycleEndTime":"` + end + `"}`
+}
+
+func formatNumber(value float64) string {
+	if value == float64(int64(value)) {
+		return strconv.FormatInt(int64(value), 10)
+	}
+	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+// A WorkBuddy account earns a package a day, so a long-lived account has dozens
+// and a card that lists every one is a wall of near-identical rows. The soonest
+// expiring ones are listed and the rest folded into one row -- but the totals have
+// to keep counting all of them, or the summary stops matching the list.
+func TestQuotaFoldsThePackageTail(t *testing.T) {
+	accounts := make([]string, 0, 12)
+	// Twelve packages, one per day, so the last is the furthest away.
+	for day := 1; day <= 12; day++ {
+		accounts = append(accounts, packageJSON("日签包", "p", 100, 100,
+			fmt.Sprintf("2026-10-%02d 00:00:00", day)))
+	}
+	resp, err := quotaFromBilling(billingBody(t, `{"Accounts":[`+strings.Join(accounts, ",")+`]}`))
+	if err != nil {
+		t.Fatalf("quotaFromBilling: %v", err)
+	}
+
+	// Five listed packages plus the folded row.
+	if len(resp.Groups) != quotaDetailLimit+1 {
+		t.Fatalf("groups = %d, want %d listed + 1 folded", len(resp.Groups), quotaDetailLimit)
+	}
+	if got := resp.Groups[quotaDetailLimit].DisplayName; got != "其余 7 个包裹" {
+		t.Fatalf("folded row = %q, want the remaining seven", got)
+	}
+	if got := resp.Groups[quotaDetailLimit].Buckets[0].Description; got != "700 / 700" {
+		t.Fatalf("folded row amount = %q, want the tail's sum", got)
+	}
+
+	// The listed ones are the soonest to expire, in order.
+	for index, want := range []string{"2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05"} {
+		if got := resp.Groups[index].Buckets[0].ResetTime; got[:10] != want {
+			t.Fatalf("row %d resets %q, want %s", index, got, want)
+		}
+	}
+	// The folded row resets with the last of the tail.
+	if got := resp.Groups[quotaDetailLimit].Buckets[0].ResetTime; got[:10] != "2026-10-12" {
+		t.Fatalf("folded reset = %q, want the furthest expiry", got)
+	}
+
+	// Every package is still counted.
+	if remain, _ := metricValue(resp, "remain"); remain != 1200 {
+		t.Fatalf("summary remain = %v, want 1200 (all twelve packages)", remain)
+	}
+	if total, _ := metricValue(resp, "total"); total != 1200 {
+		t.Fatalf("summary total = %v, want 1200", total)
+	}
+}
+
+// A short list is not folded at all.
+func TestQuotaListsEveryPackageWhenThereAreFew(t *testing.T) {
+	body := billingBody(t, `{"Accounts":[`+
+		packageJSON("体验版", "p1", 500, 500, "2026-10-31 23:59:59")+`,`+
+		packageJSON("裂变包", "p2", 37, 100, "2026-10-14 11:27:00")+`]}`)
+	resp, err := quotaFromBilling(body)
+	if err != nil {
+		t.Fatalf("quotaFromBilling: %v", err)
+	}
+	if len(resp.Groups) != 2 {
+		t.Fatalf("groups = %d, want both packages listed and nothing folded", len(resp.Groups))
+	}
+	// Sorted soonest first, so the nearly-expired package leads.
+	if got := resp.Groups[0].DisplayName; got != "裂变包" {
+		t.Fatalf("first group = %q, want the soonest-expiring package", got)
+	}
 }

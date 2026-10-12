@@ -49,6 +49,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -62,7 +63,7 @@ import (
 const (
 	providerID = "workbuddy"
 	pluginName = "WorkBuddy"
-	pluginVer  = "0.3.24"
+	pluginVer  = "0.3.25"
 	// pluginAuthor and pluginLogoURL are the same values the store registry
 	// carries, so the panel card and the store entry describe one plugin rather
 	// than two.
@@ -907,17 +908,7 @@ type billingEnvelope struct {
 	Data struct {
 		Response struct {
 			Data struct {
-				Accounts []struct {
-					AccountID           int      `json:"AccountId"`
-					PackageName         string   `json:"PackageName"`
-					PackageCode         string   `json:"PackageCode"`
-					CapacityRemain      *float64 `json:"CapacityRemain"`
-					CapacitySize        *float64 `json:"CapacitySize"`
-					CycleCapacityRemain *float64 `json:"CycleCapacityRemain"`
-					CycleCapacitySize   *float64 `json:"CycleCapacitySize"`
-					CycleEndTime        string   `json:"CycleEndTime"`
-					Status              int      `json:"Status"`
-				} `json:"Accounts"`
+				Accounts []billingPackage `json:"Accounts"`
 			} `json:"Data"`
 		} `json:"Response"`
 	} `json:"Data"`
@@ -1059,6 +1050,42 @@ func fetchQuota(raw []byte) (pluginapi.QuotaFetchResponse, error) {
 	return quotaFromBilling(body)
 }
 
+// quotaDetailLimit is how many packages are listed individually. A WorkBuddy
+// account earns a package a day, so a card that lists every one of them is a wall
+// of near-identical rows; the rest are folded into a single aggregate row so the
+// soonest-expiring ones stay readable.
+const quotaDetailLimit = 5
+
+// billingPackage is one package in a billing response.
+type billingPackage = struct {
+	AccountID           int      `json:"AccountId"`
+	PackageName         string   `json:"PackageName"`
+	PackageCode         string   `json:"PackageCode"`
+	CapacityRemain      *float64 `json:"CapacityRemain"`
+	CapacitySize        *float64 `json:"CapacitySize"`
+	CycleCapacityRemain *float64 `json:"CycleCapacityRemain"`
+	CycleCapacitySize   *float64 `json:"CycleCapacitySize"`
+	CycleEndTime        string   `json:"CycleEndTime"`
+	Status              int      `json:"Status"`
+}
+
+// packageGroup builds the single-bucket group the panel renders as one row.
+func packageGroup(name string, remain, size float64, window, reset string) pluginapi.QuotaGroup {
+	fraction := 0.0
+	if size > 0 {
+		fraction = remain / size
+	}
+	return pluginapi.QuotaGroup{
+		DisplayName: name,
+		Buckets: []pluginapi.QuotaBucket{{
+			Window:            window,
+			RemainingFraction: fraction,
+			ResetTime:         reset,
+			Description:       fmt.Sprintf("%.0f / %.0f", remain, size),
+		}},
+	}
+}
+
 // quotaFromBilling maps a billing response onto the host's quota shape.
 //
 // It is separate from the request so the mapping can be tested directly: the bug
@@ -1075,28 +1102,60 @@ func quotaFromBilling(body []byte) (pluginapi.QuotaFetchResponse, error) {
 	if len(accounts) == 0 {
 		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("billing response contains no accounts")
 	}
+
+	// Soonest expiry first. A check-in grants a package a day, so the list grows
+	// without bound while most of it expires weeks apart; the ones an operator can
+	// act on are the ones about to lapse.
+	sort.SliceStable(accounts, func(i, j int) bool {
+		left, right := accounts[i].CycleEndTime, accounts[j].CycleEndTime
+		switch {
+		case left == right:
+			return false
+		case left == "":
+			return false
+		case right == "":
+			return true
+		default:
+			return left < right
+		}
+	})
+
+	listed := accounts
+	var folded []billingPackage
+	if len(accounts) > quotaDetailLimit {
+		listed, folded = accounts[:quotaDetailLimit], accounts[quotaDetailLimit:]
+	}
+
 	resp := pluginapi.QuotaFetchResponse{}
 	var totalRemain, totalSize float64
 	for _, account := range accounts {
 		remain, size := capacityPair(account.CycleCapacityRemain, account.CycleCapacitySize, account.CapacityRemain, account.CapacitySize)
 		totalRemain += remain
 		totalSize += size
-		name := firstNonEmpty(account.PackageName, account.PackageCode, "WorkBuddy")
-		fraction := 0.0
-		if size > 0 {
-			fraction = remain / size
-		}
-		description := fmt.Sprintf("%.0f / %.0f", remain, size)
-		resp.Groups = append(resp.Groups, pluginapi.QuotaGroup{
-			DisplayName: name,
-			Buckets: []pluginapi.QuotaBucket{{
-				Window:            account.CycleEndTime,
-				RemainingFraction: fraction,
-				ResetTime:         account.CycleEndTime,
-				Description:       description,
-			}},
-		})
 	}
+	for _, account := range listed {
+		remain, size := capacityPair(account.CycleCapacityRemain, account.CycleCapacitySize, account.CapacityRemain, account.CapacitySize)
+		resp.Groups = append(resp.Groups, packageGroup(
+			firstNonEmpty(account.PackageName, account.PackageCode, "WorkBuddy"),
+			remain, size, account.CycleEndTime, account.CycleEndTime))
+	}
+	// The tail is folded rather than dropped: the totals in the summary have to
+	// keep adding up, and "there are more packages" is itself the useful fact.
+	if len(folded) > 0 {
+		var remain, size float64
+		lastExpiry := ""
+		for _, account := range folded {
+			foldedRemain, foldedSize := capacityPair(account.CycleCapacityRemain, account.CycleCapacitySize, account.CapacityRemain, account.CapacitySize)
+			remain += foldedRemain
+			size += foldedSize
+			if account.CycleEndTime > lastExpiry {
+				lastExpiry = account.CycleEndTime
+			}
+		}
+		resp.Groups = append(resp.Groups, packageGroup(
+			fmt.Sprintf("其余 %d 个包裹", len(folded)), remain, size, "", lastExpiry))
+	}
+
 	resp.Summary = []pluginapi.QuotaMetric{
 		{Key: "remain", Label: "剩余额度", Value: totalRemain, Format: "number", Unit: "credits"},
 		{Key: "total", Label: "总额度", Value: totalSize, Format: "number", Unit: "credits"},
