@@ -247,11 +247,13 @@ type failoverCandidate struct {
 	Auth      workbuddyAuth
 }
 
-// authListSource and authCredentialSource are the two host reads the failover
-// needs. They are variables so a test can drive the loop without a host.
+// authListSource, authCredentialSource and hostAuthFilesSource are the host reads
+// this package needs. They are variables so a test can drive the logic without a
+// host.
 var (
 	authListSource       = workbuddyAccounts
 	authCredentialSource = credentialJSONForAuthIndex
+	hostAuthFilesSource  = hostAuthFiles
 )
 
 // chatCandidates lists the accounts one request may be retried on: the routed

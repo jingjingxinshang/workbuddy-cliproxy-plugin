@@ -210,7 +210,10 @@ func tokenState(auth workbuddyAuth) string {
 }
 
 // workbuddyAccounts lists the stored WorkBuddy credentials the host knows about.
-func workbuddyAccounts() ([]hostAuthFileEntry, error) {
+// hostAuthFiles lists every credential the host holds. The host does not route
+// this call by provider type, so a credential recorded under another identity is
+// visible here even though the host will never offer it to this plugin.
+func hostAuthFiles() ([]hostAuthFileEntry, error) {
 	result, errCall := hostCall(pluginabi.MethodHostAuthList, map[string]any{})
 	if errCall != nil {
 		return nil, fmt.Errorf("cannot list credentials: %w", errCall)
@@ -221,8 +224,16 @@ func workbuddyAccounts() ([]hostAuthFileEntry, error) {
 	if errUnmarshal := json.Unmarshal(result, &payload); errUnmarshal != nil {
 		return nil, fmt.Errorf("credential list is not readable: %w", errUnmarshal)
 	}
-	entries := make([]hostAuthFileEntry, 0, len(payload.Files))
-	for _, file := range payload.Files {
+	return payload.Files, nil
+}
+
+func workbuddyAccounts() ([]hostAuthFileEntry, error) {
+	files, errList := hostAuthFilesSource()
+	if errList != nil {
+		return nil, errList
+	}
+	entries := make([]hostAuthFileEntry, 0, len(files))
+	for _, file := range files {
 		if !strings.EqualFold(strings.TrimSpace(file.Provider), providerID) {
 			continue
 		}
@@ -232,6 +243,35 @@ func workbuddyAccounts() ([]hostAuthFileEntry, error) {
 		entries = append(entries, file)
 	}
 	return entries, nil
+}
+
+// retiredCredentials returns the credentials the host still records under the
+// provider identity this plugin used briefly. They are not served here, but they
+// must not be invisible either.
+func retiredCredentials() []hostAuthFileEntry {
+	files, errList := hostAuthFilesSource()
+	if errList != nil {
+		return nil
+	}
+	stale := make([]hostAuthFileEntry, 0)
+	for _, file := range files {
+		if credentialIdentity(file) != retiredIdentity {
+			continue
+		}
+		stale = append(stale, file)
+	}
+	return stale
+}
+
+// retiredCredentialMessage explains a credential set the host will not route here.
+// An empty account list reads as "you never logged in", which is the wrong story:
+// the accounts existed and only their provider identity moved.
+func retiredCredentialMessage(count int) string {
+	return fmt.Sprintf(
+		"发现 %d 个凭证的 provider 是 %q 而不是 %q，宿主不会把它们交给本插件；"+
+			"模型列表正常但提问报 auth_not_found 就是这个原因。"+
+			"把凭证文件里的 \"type\" 改回 %q 并重启 CPA 即可恢复，不需要重新登录。",
+		count, retiredIdentity, providerID, providerID)
 }
 
 // credentialJSONForAuthIndex reads one stored credential from the host.
@@ -262,6 +302,13 @@ func accountsView(raw []byte) pluginapi.ManagementResponse {
 	entries, errList := workbuddyAccounts()
 	if errList != nil {
 		return errorManagementResponse(http.StatusBadGateway, errList.Error())
+	}
+	// Nothing this plugin can serve, yet the host holds credentials: report the
+	// identity mismatch instead of rendering an empty page.
+	if len(entries) == 0 {
+		if stale := retiredCredentials(); len(stale) > 0 {
+			return errorManagementResponse(http.StatusConflict, retiredCredentialMessage(len(stale)))
+		}
 	}
 	wanted := strings.ToLower(strings.TrimSpace(managementQueryValue(raw, "name")))
 	accounts := make([]accountView, 0, len(entries))

@@ -917,3 +917,87 @@ func TestProviderIdentityIsStableAndDistinctFromThePluginID(t *testing.T) {
 		t.Fatal("a credential already on disk is no longer claimed")
 	}
 }
+
+// TestRetiredIdentityCredentialsAreReportedNotHidden pins the failure that cost a
+// release: the host adopted credentials under the provider identity this plugin
+// used in 0.4.0/0.4.1, the host routes a credential by its type, and the accounts
+// then vanished. They were dropped by a filter that said nothing, so the page
+// claimed there had never been a login and the only visible symptom was
+// auth_not_found.
+func TestRetiredIdentityCredentialsAreReportedNotHidden(t *testing.T) {
+	previousFiles := hostAuthFilesSource
+	defer func() { hostAuthFilesSource = previousFiles }()
+
+	hostAuthFilesSource = func() ([]hostAuthFileEntry, error) {
+		return []hostAuthFileEntry{{
+			AuthIndex: "stale-1",
+			Name:      retiredIdentity + "-1001.json",
+			Type:      retiredIdentity,
+			Provider:  retiredIdentity,
+		}}, nil
+	}
+
+	// The credential is invisible to the filter that decides what is served...
+	entries, errList := workbuddyAccounts()
+	if errList != nil {
+		t.Fatalf("workbuddyAccounts: %v", errList)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a credential under the retired identity was served: %+v", entries)
+	}
+	// ...and visible to the one that reports it.
+	if got := len(retiredCredentials()); got != 1 {
+		t.Fatalf("retiredCredentials() = %d, want 1", got)
+	}
+
+	// The explanation has to name both identities and the fix, or it is not
+	// actionable by an operator who has never seen this before.
+	message := retiredCredentialMessage(1)
+	for _, want := range []string{retiredIdentity, providerID, `"type"`} {
+		if !strings.Contains(message, want) {
+			t.Errorf("the explanation does not mention %q: %s", want, message)
+		}
+	}
+
+	// The accounts route must report the mismatch rather than answer with an
+	// empty list.
+	response := handleManagement(managementRequestFor("/v0/management/" + pluginID + "/accounts"))
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("accounts status = %d, want %d", response.StatusCode, http.StatusConflict)
+	}
+	if !strings.Contains(string(response.Body), providerID) {
+		t.Errorf("the accounts response does not explain the mismatch: %s", truncate(string(response.Body), 200))
+	}
+}
+
+// TestTheRetiredIdentityIsNotTheIdentityWeRegister keeps the migration target and
+// the migration source apart. Retiring an identity is only safe while it is not
+// the one being served.
+func TestTheRetiredIdentityIsNotTheIdentityWeRegister(t *testing.T) {
+	if strings.EqualFold(retiredIdentity, providerID) {
+		t.Fatalf("the retired identity equals the provider identity %q; there is nothing left to migrate to", providerID)
+	}
+	if strings.TrimSpace(retiredIdentity) == "" {
+		t.Fatal("the retired identity is empty, so nothing can be recognised")
+	}
+}
+
+// TestCredentialIdentityReadsTypeAndProvider covers the two fields the host sends
+// for a credential. The type is the routing key, and the provider key is the
+// fallback, so either may be the one that identifies the record.
+func TestCredentialIdentityReadsTypeAndProvider(t *testing.T) {
+	tests := []struct {
+		reason string
+		file   hostAuthFileEntry
+		want   string
+	}{
+		{reason: "the type is the routing key", file: hostAuthFileEntry{Type: " WorkBuddy ", Provider: "other"}, want: "workbuddy"},
+		{reason: "the provider key is the fallback", file: hostAuthFileEntry{Provider: "WORKBUDDY"}, want: "workbuddy"},
+		{reason: "an empty record matches nothing", file: hostAuthFileEntry{}, want: ""},
+	}
+	for _, test := range tests {
+		if got := credentialIdentity(test.file); got != test.want {
+			t.Errorf("%s: credentialIdentity() = %q, want %q", test.reason, got, test.want)
+		}
+	}
+}

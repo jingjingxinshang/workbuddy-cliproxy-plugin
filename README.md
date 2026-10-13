@@ -19,7 +19,8 @@
 
 ### 升级到 0.4.2
 
-- **不需要重新登录，也不需要改凭证**（provider 身份已还原为 `workbuddy`）
+- 一般**不需要重新登录**（provider 身份已还原为 `workbuddy`）
+- **如果你装过 0.4.0 / 0.4.1**：那两版把 provider 身份写成了 `workbuddy-jjxs`，宿主很可能已经把凭证按 `workbuddy-jjxs` 存盘，升级后**不会自动回来**。表现是**模型列表正常、但提问报 `auth_not_found`**。见「排障：提问报 auth_not_found」——改一次 `type` 即可，**同样不用重新登录**。
 - 只需把配置段改名：`plugins.configs.workbuddy` → `plugins.configs.workbuddy-jjxs`
   （不改也能跑：配置读不出来时插件照样注册，只是用默认值）
 - 管理接口路径随之变为 `/v0/management/workbuddy-jjxs/*`；账号页路径为 `/v0/resource/plugins/workbuddy-jjxs/quota`
@@ -359,10 +360,60 @@ WorkBuddy 原始接口属于第三方服务，登录、额度和模型接口的�
    ```yaml
    plugins:
      configs:
-       workbuddy:
-         default_region: intl     # cn | intl，默认 cn
-         daily_bonus: true        # 可选，默认 true
+       workbuddy-jjxs:        # 键名 = 插件 id（由 .so 文件名推导）
+         default_region: intl # cn | intl，默认 cn
+         daily_bonus: true    # 可选，默认 true
    ```
    ⚠️ 这两个字段**标量**就好，别写成映射或列表（`default_region: {a: b}` 会解析失败）。
 
 2. **动态库根本没加载。** 检查：文件名必须是 `workbuddy-jjxs.so`（插件 id 由**文件名**推导，改了名就换了 id，配置项对不上）；架构要匹配宿主（`amd64` / `arm64`）；手动装与商店装不要混用 —— 商店安装会记录 `store:` 并清理其它库文件，可能把手动放的 `.so` 删掉。
+
+## 排障：提问报 `auth_not_found`（no auth available）
+
+```json
+{"error":{"message":"auth_not_found: no auth available (providers=workbuddy, model=deepseek-v4.1-flash)","type":"server_error"}}
+```
+
+**含义**：模型是注册在 `workbuddy` 下的（所以**模型列表正常**），但宿主手里的凭证 `type` 不是 `workbuddy`，于是「provider=workbuddy 找不到可用认证」。
+
+**成因**：0.4.0 / 0.4.1 把 provider 身份错写成了 `workbuddy-jjxs`，宿主在那期间把凭证按 `workbuddy-jjxs` 存盘；0.4.2 把 provider 身份改回 `workbuddy`，这些凭证**不会自己回来**。宿主按凭证的 `type` 路由，所以它再也不把凭证交给本插件。
+
+**确认**（`<KEY>` 换成管理密钥，端口按实际改）：
+
+```bash
+curl -s -H "Authorization: Bearer <KEY>" \
+  http://127.0.0.1:8317/v0/management/auth-files \
+  | python3 -m json.tool | grep -B2 -A8 -i workbuddy
+```
+
+看每个 WorkBuddy 凭证的 `type` / `disabled`：
+
+| 看到 | 结论 |
+|---|---|
+| `"type": "workbuddy-jjxs"` | 就是本问题，按下面处理 |
+| `"type": "workbuddy"` 且 `"disabled": true` | 凭证被停用了，在面板「凭证管理」里重新启用（代码不会自动恢复被停用的凭证） |
+
+**处理方式（二选一，都不需要重新登录）**
+
+1. **改凭证的 `type`**（推荐，一次改完，保留所有账号）。凭证文件在 CPA 的 auths 目录，形如 `workbuddy-jjxs-<uid>.json`，只替换 `type` 字段后重启 CPA：
+
+   ```bash
+   cd "<CPA 的 auths 目录>"
+   python3 - <<'PY'
+   import glob, re
+   for path in glob.glob('workbuddy-jjxs-*.json'):
+       with open(path) as fh:
+           raw = fh.read()
+       fixed = re.sub(r'"type"\s*:\s*"workbuddy-jjxs"', '"type": "workbuddy"', raw)
+       if fixed != raw:
+           with open(path, 'w') as fh:
+               fh.write(fixed)
+           print('retyped', path)
+   PY
+   ```
+
+2. **重新登录一个账号**：走一次授权。新凭证的 `type` 一定是 `workbuddy` —— 新账号能提问、老账号报错，就印证了判断，之后再按 1 处理其余账号。
+
+> **0.4.3 起插件不再静默隐藏这类凭证**：账号页会直接返回 409 并写明原因，
+> `/v0/management/workbuddy-jjxs/status` 也会带上 `retired_credentials` 计数。
+> 0.4.2 及以前的表现是「账号页空的 / 模型列表空的」，看不出原因。

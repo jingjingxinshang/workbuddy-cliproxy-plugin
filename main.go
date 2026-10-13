@@ -76,7 +76,7 @@ const (
 	// distinct from any other WorkBuddy plugin.
 	pluginID   = "workbuddy-jjxs"
 	pluginName = "WorkBuddy"
-	pluginVer  = "0.4.2"
+	pluginVer  = "0.4.3"
 	// pluginAuthor and pluginLogoURL are the same values the store registry
 	// carries, so the panel card and the store entry describe one plugin rather
 	// than two.
@@ -1412,7 +1412,7 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 	}
 
 	if strings.HasSuffix(path, "/status") {
-		body, errMarshal := json.Marshal(map[string]any{
+		payload := map[string]any{
 			"provider": providerID,
 			"name":     pluginName,
 			"version":  pluginVer,
@@ -1422,7 +1422,15 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 				"status": "/v0/management/get-auth-status",
 			},
 			"quota": "/v0/management/" + pluginID + "/quota",
-		})
+		}
+		// Surface a credential set the host will not route here. Without this the
+		// symptom is an empty model list or auth_not_found and nothing in the
+		// plugin says why.
+		if stale := len(retiredCredentials()); stale > 0 {
+			payload["retired_credentials"] = stale
+			payload["retired_credentials_message"] = retiredCredentialMessage(stale)
+		}
+		body, errMarshal := json.Marshal(payload)
 		if errMarshal != nil {
 			body = []byte(`{"provider":"` + providerID + `"}`)
 		}
@@ -1486,13 +1494,37 @@ type hostAuthFileEntry struct {
 	Name      string `json:"name"`
 	Provider  string `json:"provider"`
 	Label     string `json:"label"`
+	// Type is the provider type the host recorded for the credential. It is what
+	// the host routes a credential by, so it is read separately from Provider:
+	// after this plugin's identity changed, credentials kept a type that no longer
+	// names it, and they were dropped from every list without a word.
+	Type string `json:"type,omitempty"`
 	// Disabled and Status are read only by the chat failover, which must not
 	// retry a request on an account an operator has switched off. A host that
 	// does not send them leaves the zero values, which simply means "not known to
 	// be disabled".
 	Disabled bool   `json:"disabled,omitempty"`
 	Status   string `json:"status,omitempty"`
+	// StatusMessage carries the host's latest detail for the credential.
+	StatusMessage string `json:"status_message,omitempty"`
+	Unavailable   bool   `json:"unavailable,omitempty"`
 }
+
+// credentialIdentity reports the identity a credential record carries. The host
+// sends the provider type and the provider key separately and either can be the
+// one that matters, so both are considered.
+func credentialIdentity(file hostAuthFileEntry) string {
+	return strings.ToLower(strings.TrimSpace(firstNonEmpty(file.Type, file.Provider)))
+}
+
+// retiredIdentity is the provider identity this plugin briefly registered, in
+// 0.4.0 and 0.4.1. Credentials the host adopted during those releases still carry
+// it, and the host routes a credential by its type, so they are not offered to
+// this plugin any more: the accounts disappear and the model list goes empty.
+//
+// They are recognised rather than ignored. A silently empty account list is the
+// worst way to learn this happened.
+const retiredIdentity = "workbuddy-jjxs"
 
 // resolveAuthIndex picks the credential to query.
 //
