@@ -457,3 +457,22 @@ curl -X POST -H "Authorization: Bearer <KEY>" \
   http://127.0.0.1:8317/v0/management/workbuddy-jjxs/autotasks
 ```
 返回每个账号的 `accepted` / `claimed` / `chat_reports` 以及错误明细。
+
+## 排障：`request illegal` / `11-128`、提示「没通过渠道校验，请用官方版本重新发送」
+
+这是上游的**客户端形状校验**，不是账号问题：此时凭证、余额、JWT 都正常，换模型或改请求头都无效，同一个号在官方客户端里可以正常用。上游对 `messages[0]` 有要求：
+
+| 首条消息 role | 上游反应 |
+|---|---|
+| `system` | 正常 |
+| `user` / `assistant` / `tool` | 400 `11-128`「first message is not system prompt」，界面提示就是上面那句 |
+| `developer` | 同样被拒，报的是 `unapproved channel` |
+
+**0.4.6 起插件会自动整形**（发上游前，只在需要时动）：
+
+- 首条已是 `system` → **逐字不动**（不做整树解析/重编码）
+- 首条是 `developer` → 就地改成 `system`，内容保留
+- 首条是其它 → 在最前面补一条普通 system 提示词，原有消息顺序与内容不变
+- 没有 `messages` 或为空 → 不动（不凭空造对话）
+
+如果升级后仍报这句，说明触发点不在首条消息，而是更底层的指纹校验：Go 客户端的 TLS 指纹（JA3/JA4）与官方客户端不同，这一点插件无法完全伪装；此时把错误原文和请求形状发出来，按实测再判断。

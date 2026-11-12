@@ -76,7 +76,7 @@ const (
 	// distinct from any other WorkBuddy plugin.
 	pluginID   = "workbuddy-jjxs"
 	pluginName = "WorkBuddy"
-	pluginVer  = "0.4.5"
+	pluginVer  = "0.4.6"
 	// pluginAuthor and pluginLogoURL are the same values the store registry
 	// carries, so the panel card and the store entry describe one plugin rather
 	// than two.
@@ -745,7 +745,10 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	if err := json.Unmarshal(req.StorageJSON, &auth); err != nil || auth.AccessToken == "" {
 		return errorEnvelope("authentication_error", "WorkBuddy auth is missing", http.StatusUnauthorized), nil
 	}
-	status, body, err := executeChat(req.AuthID, auth, req.Model, req.Payload, stream)
+	// The upstream rejects a request whose first message is not a system prompt
+	// with a channel-verification error, so the payload is shaped before it is
+	// sent. A well-formed request is returned unchanged.
+	status, body, err := executeChat(req.AuthID, auth, req.Model, ensureSystemFirst(req.Payload), stream)
 	if err != nil {
 		return errorEnvelope("upstream_error", err.Error(), http.StatusBadGateway), nil
 	}
