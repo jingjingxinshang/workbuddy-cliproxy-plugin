@@ -417,3 +417,43 @@ curl -s -H "Authorization: Bearer <KEY>" \
 > **0.4.3 起插件不再静默隐藏这类凭证**：账号页会直接返回 409 并写明原因，
 > `/v0/management/workbuddy-jjxs/status` 也会带上 `retired_credentials` 计数。
 > 0.4.2 及以前的表现是「账号页空的 / 模型列表空的」，看不出原因。
+
+## 任务中心自动巡检（默认关闭）
+
+> ⚠️ 这一段会**用你自己的账号**去调上游任务接口。默认**关闭**，要显式开启：
+> ```yaml
+> plugins:
+>   configs:
+>     workbuddy-jjxs:
+>       auto_tasks: true
+> ```
+> 开启后在本地时间 **09:00 / 15:00 / 21:00** 各跑一次（每小时窗内只跑一次）；
+> 也可随时手动触发，不受开关限制。
+
+**做什么**
+
+| 步骤 | 说明 |
+|---|---|
+| 接受 | 把「待接受」的任务一次性 accept |
+| 补足 | `chat_5` 这类按对话次数计的任务，用插件已经在用的活动上报事件补足差额（单轮上限 10 条） |
+| 领取 | 只领 `progress 已达标 且 未领取 且 未锁定` 的任务 |
+
+**不做什么（重要）**
+
+- **不合成行为链**。参考实现里 `RichMeow_Chat`、`Buddy_App`、`template_5`、`expert_5`、`Hp_Appearance` 等任务靠伪造桌面端/客户端事件链点亮，这些事件形态一旦不对就是在给账号做风险画像，本插件不实现。因此**做不到「17/18」**，只能拿到「已完成/可补足」的那部分。
+- 不改配置、不改主题、不建专家/模板类真实资源。
+
+**边界**
+
+- 只处理**个人版 + 国区**凭证：企业版调该接口会 403（`growth system is only available for personal users`），国际区任务为只读。
+- 被禁用（disabled）的凭证跳过。
+- 账号之间间隔 3 秒，避免看起来像一串突发流量。
+- 领奖是**幂等**的（重复领上游返回 `already_claimed`、0 分），所以单条失败只记 WARN，下一轮自动重试。
+
+**手动触发**
+
+```bash
+curl -X POST -H "Authorization: Bearer <KEY>" \
+  http://127.0.0.1:8317/v0/management/workbuddy-jjxs/autotasks
+```
+返回每个账号的 `accepted` / `claimed` / `chat_reports` 以及错误明细。

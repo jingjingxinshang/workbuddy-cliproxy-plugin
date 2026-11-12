@@ -76,7 +76,7 @@ const (
 	// distinct from any other WorkBuddy plugin.
 	pluginID   = "workbuddy-jjxs"
 	pluginName = "WorkBuddy"
-	pluginVer  = "0.4.4"
+	pluginVer  = "0.4.5"
 	// pluginAuthor and pluginLogoURL are the same values the store registry
 	// carries, so the panel card and the store entry describe one plugin rather
 	// than two.
@@ -144,6 +144,11 @@ type pluginConfig struct {
 	// absent key stays distinguishable from an explicit false; absent means
 	// enabled, because the engine only ever touches international credentials.
 	DailyBonus *bool `yaml:"daily_bonus"`
+	// AutoTasks gates the scheduled growth task-centre sweep. It is a pointer
+	// for the same reason as DailyBonus, but with the opposite default: it acts
+	// on the operator's own account, so absent means off and it has to be asked
+	// for explicitly.
+	AutoTasks *bool `yaml:"auto_tasks"`
 }
 
 // lifecycleRequest is the plugin.register / plugin.reconfigure payload. The
@@ -409,7 +414,7 @@ func handleMethod(method string, raw []byte) ([]byte, error) {
 }
 
 func registrationData() registration {
-	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: pluginapi.Metadata{Name: pluginName, Version: pluginVer, Author: pluginAuthor, GitHubRepository: "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin", Logo: pluginLogoURL, ConfigFields: []pluginapi.ConfigField{{Name: "default_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "WorkBuddy cluster new logins default to. The panel's OAuth card starts a login without parameters, so this decides between the CN and INTL clusters."}, {Name: "daily_bonus", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable the scheduled international daily credit reward at 08:00/12:00/16:00/20:00 local time (default true). It reports one activity event per international account so each earns its 30-credit daily pack, and is idempotent per account per day. Domestic accounts are never touched."}}}, Capabilities: registrationCapability{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"chat-completions"}, ExecutorOutputFormats: []string{"chat-completions"}, CommandLinePlugin: true, ManagementAPI: true, QuotaProvider: true}}
+	return registration{SchemaVersion: pluginabi.SchemaVersion, Metadata: pluginapi.Metadata{Name: pluginName, Version: pluginVer, Author: pluginAuthor, GitHubRepository: "https://github.com/jingjingxinshang/workbuddy-cliproxy-plugin", Logo: pluginLogoURL, ConfigFields: []pluginapi.ConfigField{{Name: "default_region", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "intl"}, Description: "WorkBuddy cluster new logins default to. The panel's OAuth card starts a login without parameters, so this decides between the CN and INTL clusters."}, {Name: "daily_bonus", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable the scheduled international daily credit reward at 08:00/12:00/16:00/20:00 local time (default true). It reports one activity event per international account so each earns its 30-credit daily pack, and is idempotent per account per day. Domestic accounts are never touched."}, {Name: "auto_tasks", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable the scheduled growth task-centre sweep at 09:00/15:00/21:00 local time (default false). Each run accepts tasks that are waiting to be accepted and claims rewards for tasks that already reached their target, for personal domestic credentials only; it does not synthesise the behaviour chains some tasks require, and chat tasks are topped up with the same activity report the daily reward uses. Claiming is idempotent."}}}, Capabilities: registrationCapability{ModelProvider: true, AuthProvider: true, Executor: true, ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth, ExecutorInputFormats: []string{"chat-completions"}, ExecutorOutputFormats: []string{"chat-completions"}, CommandLinePlugin: true, ManagementAPI: true, QuotaProvider: true}}
 }
 
 // configure reads the configuration the host delivers on register and
@@ -1448,6 +1453,12 @@ func handleManagement(raw []byte) pluginapi.ManagementResponse {
 			return errorManagementResponse(http.StatusMethodNotAllowed, "dailybonus is a POST route")
 		}
 		return dailyBonusRouteResponse(raw)
+	}
+	if strings.HasSuffix(path, "/"+pluginID+"/autotasks") {
+		if method := managementRequestMethod(raw); method != "" && method != http.MethodPost {
+			return errorManagementResponse(http.StatusMethodNotAllowed, "autotasks is a POST route")
+		}
+		return autoTasksRouteResponse(raw)
 	}
 	// data.
 	if strings.HasSuffix(path, "/"+pluginID+"/quota") {
