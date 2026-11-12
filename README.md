@@ -34,7 +34,7 @@
 - WorkBuddy CN 和 INTL 登录状态创建与轮询
 - access token / refresh token 持久化到 CPA auth 记录
 - 自动刷新 token
-- `/v3/config` 模型发现
+- `/v3/config` 模型发现（该端点对企业账号可能返回空目录，此时自动回退 `/v2/enterprises/personal/models` → `/console/enterprises/personal/models`，并跳过 `disabled` 条目）
 - `/v2/chat/completions` 普通和 SSE 请求
 - WorkBuddy 所需的 Origin、Referer、User-Agent、账号身份请求头
 - QuotaProvider：`/billing/meter/get-user-resource` 额度查询（企业号走 `get-enterprise-user-usage`）

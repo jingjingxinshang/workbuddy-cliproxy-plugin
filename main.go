@@ -76,7 +76,7 @@ const (
 	// distinct from any other WorkBuddy plugin.
 	pluginID   = "workbuddy-jjxs"
 	pluginName = "WorkBuddy"
-	pluginVer  = "0.4.3"
+	pluginVer  = "0.4.4"
 	// pluginAuthor and pluginLogoURL are the same values the store registry
 	// carries, so the panel card and the store entry describe one plugin rather
 	// than two.
@@ -226,8 +226,15 @@ type catalogResponse struct {
 		Models []string `json:"models"`
 	} `json:"agents"`
 	Models []struct {
-		ID                string   `json:"id"`
-		Name              string   `json:"name"`
+		ID string `json:"id"`
+		// ModelID and Model are looser id keys: some catalogs send one of them
+		// instead of id, and an entry without any is skipped rather than
+		// registered under an empty name.
+		ModelID string `json:"modelId"`
+		Model   string `json:"model"`
+		Name    string `json:"name"`
+		// Disabled marks a catalog entry the account may not use.
+		Disabled          bool     `json:"disabled"`
 		DescriptionEN     string   `json:"descriptionEn"`
 		DescriptionZH     string   `json:"descriptionZh"`
 		MaxInputTokens    int64    `json:"maxInputTokens"`
@@ -632,6 +639,42 @@ func refreshAuth(raw []byte) pluginapi.AuthRefreshResponse {
 	return pluginapi.AuthRefreshResponse{Auth: authData(auth, req.AuthID+".json"), NextRefreshAfter: time.UnixMilli(auth.ExpiresAt).Add(-5 * time.Minute)}
 }
 
+// modelCatalogPaths lists the catalog endpoints to try, in order.
+//
+// A personal credential is served by /v3/config. An enterprise credential can
+// answer there with an empty catalog while listing its models on the enterprise
+// endpoints, which carry the same envelope (data.models plus data.agents), so
+// those are read only when the previous path produced no usable model.
+var modelCatalogPaths = []string{
+	"/v3/config",
+	"/v2/enterprises/personal/models",
+	"/console/enterprises/personal/models",
+}
+
+// readModelCatalog reads one catalog endpoint. It reports false when the call
+// failed or the payload was not a catalog, which is what makes the caller try
+// the next path.
+func readModelCatalog(profile regionProfile, auth workbuddyAuth, path string) (catalogResponse, bool) {
+	headers := map[string]string{"Authorization": "Bearer " + auth.AccessToken, "X-Product": "SaaS"}
+	status, body, errCall := upstream("GET", profile.baseURL+path, profile.origin, authUserAgent(auth, profile), headers, nil, false)
+	if errCall != nil || status >= 400 {
+		return catalogResponse{}, false
+	}
+	var env serverEnvelope
+	var catalog catalogResponse
+	if json.Unmarshal(body, &env) == nil && env.Data != nil {
+		if env.Code != 0 {
+			return catalogResponse{}, false
+		}
+		if json.Unmarshal(env.Data, &catalog) != nil {
+			return catalogResponse{}, false
+		}
+	} else if json.Unmarshal(body, &catalog) != nil {
+		return catalogResponse{}, false
+	}
+	return catalog, true
+}
+
 func discoverModels(raw []byte) pluginapi.ModelResponse {
 	var req pluginapi.AuthModelRequest
 	_ = json.Unmarshal(raw, &req)
@@ -640,24 +683,24 @@ func discoverModels(raw []byte) pluginapi.ModelResponse {
 		return pluginapi.ModelResponse{Provider: providerID}
 	}
 	profile := profiles[regionOf(auth)]
-	headers := map[string]string{"Authorization": "Bearer " + auth.AccessToken, "X-Product": "SaaS"}
-	status, body, err := upstream("GET", profile.baseURL+"/v3/config", profile.origin, authUserAgent(auth, profile), headers, nil, false)
-	if err != nil || status >= 400 {
-		return pluginapi.ModelResponse{Provider: providerID}
-	}
-	var env serverEnvelope
 	var catalog catalogResponse
-	if json.Unmarshal(body, &env) == nil && env.Data != nil {
-		if env.Code != 0 {
-			return pluginapi.ModelResponse{Provider: providerID}
+	for _, path := range modelCatalogPaths {
+		next, okCatalog := readModelCatalog(profile, auth, path)
+		if okCatalog && len(next.Models) > 0 {
+			catalog = next
+			break
 		}
-		_ = json.Unmarshal(env.Data, &catalog)
-	} else {
-		_ = json.Unmarshal(body, &catalog)
 	}
 	models := make([]pluginapi.ModelInfo, 0, len(catalog.Models))
 	for _, m := range catalog.Models {
+		if m.Disabled {
+			continue
+		}
 		if hasTag(m.Tags, "lite") || hasTag(m.Tags, "text-to-image") || hasTag(m.Tags, "image-to-image") {
+			continue
+		}
+		id := firstNonEmpty(m.ID, m.ModelID, m.Model)
+		if id == "" {
 			continue
 		}
 		input := []string{"text"}
@@ -674,14 +717,14 @@ func discoverModels(raw []byte) pluginapi.ModelResponse {
 		}
 		display := m.Name
 		if display == "" {
-			display = m.ID
+			display = id
 		}
 		levels := m.Reasoning.SupportedEfforts
 		var thinking *pluginapi.ThinkingSupport
 		if m.SupportsReasoning {
 			thinking = &pluginapi.ThinkingSupport{Levels: levels, ZeroAllowed: m.Reasoning.CanDisableThinking, DynamicAllowed: true}
 		}
-		models = append(models, pluginapi.ModelInfo{ID: m.ID, Name: m.ID, Object: "model", OwnedBy: providerID, DisplayName: display, Description: firstNonEmpty(m.DescriptionEN, m.DescriptionZH), ContextLength: context, MaxCompletionTokens: output, SupportedGenerationMethods: []string{"chat"}, SupportedInputModalities: input, SupportedOutputModalities: []string{"text"}, SupportedParameters: []string{"tools", "stream"}, Thinking: thinking})
+		models = append(models, pluginapi.ModelInfo{ID: id, Name: id, Object: "model", OwnedBy: providerID, DisplayName: display, Description: firstNonEmpty(m.DescriptionEN, m.DescriptionZH), ContextLength: context, MaxCompletionTokens: output, SupportedGenerationMethods: []string{"chat"}, SupportedInputModalities: input, SupportedOutputModalities: []string{"text"}, SupportedParameters: []string{"tools", "stream"}, Thinking: thinking})
 	}
 	return pluginapi.ModelResponse{Provider: providerID, Models: models, AuthUpdate: *reqAuthUpdate(req, auth)}
 }

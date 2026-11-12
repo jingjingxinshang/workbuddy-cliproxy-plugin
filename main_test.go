@@ -1001,3 +1001,74 @@ func TestCredentialIdentityReadsTypeAndProvider(t *testing.T) {
 		}
 	}
 }
+
+// An enterprise credential can answer /v3/config with an empty catalog and list
+// its models on the enterprise endpoints. Discovery must reach the second path
+// instead of reporting no models at all, and must skip the entries the catalog
+// marks unusable or leaves unnamed.
+func TestDiscoverModelsFallsBackToTheEnterpriseCatalog(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v3/config":
+			_, _ = w.Write([]byte(`{"code":0,"data":{"models":[]}}`))
+		case "/v2/enterprises/personal/models":
+			// modelId instead of id, one disabled entry, one entry with no key.
+			_, _ = w.Write([]byte(`{"code":0,"data":{"models":[` +
+				`{"modelId":"glm-5.3","name":"GLM-5.3"},` +
+				`{"id":"disabled-model","disabled":true},` +
+				`{"id":""}]}}`))
+		default:
+			_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
+		}
+	}))
+	defer srv.Close()
+	stubRegion(t, srv.URL)
+
+	raw, errMarshal := json.Marshal(pluginapi.AuthModelRequest{
+		StorageJSON: []byte(`{"access_token":"at","region":"cn"}`),
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal model request: %v", errMarshal)
+	}
+
+	resp := discoverModels(raw)
+
+	if len(paths) != 2 || paths[0] != "/v3/config" || paths[1] != "/v2/enterprises/personal/models" {
+		t.Fatalf("catalog calls = %v, want /v3/config then the enterprise path", paths)
+	}
+	if len(resp.Models) != 1 || resp.Models[0].ID != "glm-5.3" {
+		t.Fatalf("models = %+v, want exactly the enabled enterprise model", resp.Models)
+	}
+}
+
+// The fallback must not cost an extra round trip when the usual catalog answers:
+// discovery runs on every model refresh.
+func TestDiscoverModelsStopsAtTheFirstCatalogWithModels(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"models":[{"id":"glm-5.2","name":"GLM-5.2"}]}}`))
+	}))
+	defer srv.Close()
+	stubRegion(t, srv.URL)
+
+	raw, errMarshal := json.Marshal(pluginapi.AuthModelRequest{
+		StorageJSON: []byte(`{"access_token":"at","region":"cn"}`),
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal model request: %v", errMarshal)
+	}
+
+	resp := discoverModels(raw)
+
+	if len(paths) != 1 || paths[0] != "/v3/config" {
+		t.Fatalf("catalog calls = %v, want only /v3/config", paths)
+	}
+	if len(resp.Models) != 1 || resp.Models[0].ID != "glm-5.2" {
+		t.Fatalf("models = %+v, want the catalog model", resp.Models)
+	}
+}
